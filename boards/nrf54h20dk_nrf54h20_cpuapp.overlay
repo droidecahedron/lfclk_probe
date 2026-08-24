@@ -1,0 +1,40 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Both nodes ship disabled in nrf54h20.dtsi and nothing on this board target
+ * claims either one. Enabling them here instead of alongside the probe logic
+ * keeps a resource conflict bisectable to this file.
+ *
+ * cpuapp has no core-local TIMER, RTC or DPPIC at all: nrf54h20_cpuapp.dtsi
+ * deletes cpurad_peripherals, and cpuapp_peripherals holds only the local
+ * HSFLL, IPCT, two WDTs, resetinfo and the 802.15.4 node. Everything below is
+ * therefore in the global domain at peripheral@5f000000.
+ */
+
+/*
+ * LF side of the measurement. rtc130 counts lfclk directly
+ * (nrf54h20.dtsi rtc@928000: clocks = <&lfclk>, clock-frequency = <32768>,
+ * prescaler = <1>, cc-num = <4>), which is the whole point: it is the only
+ * counter here whose rate is the thing under test.
+ */
+&rtc130 {
+	status = "okay";
+};
+
+/*
+ * HF side. timer130 is clocked from fll16m with prescaler 0
+ * (nrf54h20.dtsi timer@9a2000: clocks = <&fll16m>, prescaler = <0>,
+ * cc-num = <6>, max-bit-width = <32>), so the reference is the 16 MHz slow
+ * peripheral clock rather than anything DVFS touches.
+ *
+ * Not timer120 or timer121: those hang off hsfll120, which scales with DVFS,
+ * and their IRQs are routed to FLPR by default. Not timer020/021/022 either,
+ * those are cpurad-local and deleted from this build.
+ */
+&timer130 {
+	status = "okay";
+};
