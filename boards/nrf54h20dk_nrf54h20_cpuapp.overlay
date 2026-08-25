@@ -50,7 +50,7 @@
 };
 
 /*
- * Fabric for the hardware-gated variant. rtc130 sits on the 0x5f92_0000 bus
+ * DPPI route for the hardware-gated variant. rtc130 sits on the 0x5f92_0000 bus
  * (SPU131) and timer130 on 0x5f9a_0000 (SPU134), confirmed by the generated
  * SPU_PERIPH_PERM entries, so an RTC event reaching a TIMER task has to cross a
  * PPIB bridge. dppic130 is the hub and takes no link property of its own; the
@@ -66,7 +66,7 @@
  * claiming them emits SPU_PERIPH_PERM writes that periphconf-check rejects as
  * UNRECOGNIZED_REGISTER, which stops the device booting.
  *
- * Channels 2 and 3, not 0 and 1: MPSL reserves DPPIC130 channel 0 for itself
+ * MPSL reserves DPPIC130 channel 0 for itself
  * (MPSL_RESERVED_DPPI_SINK_CHANNELS in nrf/subsys/mpsl/init/mpsl_init.c), and
  * this probe is meant to coexist with a radio application. The first channel is
  * the start boundary, the second the end boundary, read back in C from these

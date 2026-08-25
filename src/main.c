@@ -66,8 +66,8 @@ static const struct device *const lf_counter = DEVICE_DT_GET(LF_COUNTER_NODE);
 static const struct device *const hf_counter = DEVICE_DT_GET(HF_COUNTER_NODE);
 static const struct device *const lf_ref_clock = DEVICE_DT_GET(FLL16M_NODE);
 
-/* accuracy here is a sentinel, not a ppm figure: ACCURACY_MAX asks the driver
- * for its best option instead of making this file guess a number. precision has
+/* accuracy here is a sentinel: ACCURACY_MAX asks the driver for its best
+ * option instead of making this file guess a ppm figure. precision has
  * to stay DEFAULT, fll16m_resolve_spec_to_idx() rejects anything else with
  * -EINVAL.
  */
@@ -134,7 +134,7 @@ static int lf_ref_acquire(void)
 		return err;
 	}
 
-	/* Debug, not info: this runs before every scheduled probe now, and an
+	/* Logged at debug level. This runs before every scheduled probe, and an
 	 * hourly reminder of a figure that cannot change is noise. main() logs it
 	 * once at boot, which is where it matters.
 	 */
@@ -475,11 +475,11 @@ static const char *lf_verdict_str(enum lf_verdict verdict)
  * bridge produces the identical -ETIMEDOUT, which is exactly how the missing
  * EVTEN bit presented on the bench. So LF_ABSENT is only returned when the
  * software gate fails too. A capture that times out while the software gate
- * still reads a healthy clock is a fabric fault, and this returns an errno for
+ * still reads a healthy clock is a DPPI route fault, and this returns an errno
  * that rather than condemning good hardware.
  *
  * @retval 0       Verdict determined, written to @p verdict.
- * @retval -EIO    Fabric fault. The clock is running, the capture path is not.
+ * @retval -EIO    DPPI route fault. The clock runs, the captured gate does not.
  * @retval negative Other measurement failure.
  */
 static int lf_verdict_get(uint32_t gate_ticks, enum lf_verdict *verdict,
@@ -513,7 +513,7 @@ static int lf_verdict_get(uint32_t gate_ticks, enum lf_verdict *verdict,
 	}
 
 	LOG_ERR("capture failed (err %d) but the software gate read %d ppm: "
-		"fabric fault, not a clock fault", cap_err, meas->ppm);
+		"DPPI route fault, not a clock fault", cap_err, meas->ppm);
 
 	return -EIO;
 }
@@ -568,7 +568,7 @@ static int lf_ref_release(void)
 	return 0;
 }
 
-/* One scheduled probe. The fabric and the reference are both taken for the gate
+/* One scheduled probe. The DPPI channels and the reference are both taken for
  * and given back after, same as the reference always was: DPPI channels and a
  * running HFXO are not worth holding for an hour to use them for 125 ms.
  */
@@ -661,10 +661,10 @@ static void lf_monitor_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
-	/* Absolute deadlines, not relative sleeps. Both figures are budgets
-	 * measured from boot, and a relative sleep would push the late probe out
-	 * by however long the early one took: 600 ms plus a 1 s gate plus 4400 ms
-	 * lands at 6 s, not 5, which misses the window it was sized for.
+	/* Both deadlines are absolute. The figures are budgets measured from boot,
+	 * and a relative sleep runs from the end of the previous probe: 600 ms plus
+	 * a 1 s gate plus 4400 ms lands at 6 s instead of the 5 s the window was
+	 * sized for.
 	 */
 	k_sleep(K_TIMEOUT_ABS_MS(LF_PROBE_EARLY_MS));
 	lf_probe_run("early", LF_GATE_TICKS_LONG);
@@ -721,7 +721,7 @@ int main(void)
 		return -ENODEV;
 	}
 
-	/* Nominals, not measurements. counter_get_frequency() returns what the
+	/* Both figures are DT nominals. counter_get_frequency() returns what the
 	 * driver derived from the node's clock parent and prescaler at build
 	 * time, so the HF figure is FLL16M's declared rate rather than its
 	 * current one. FLL16M is power optimised until accuracy is requested on

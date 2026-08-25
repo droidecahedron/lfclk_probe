@@ -58,27 +58,17 @@
  */
 #define LF_PPM_REJECT 2000
 
-/*
- * One-sided, and say so plainly: this is five times the worst mean absolute
- * deviation seen on a known good board at the point where the probe actually
- * measures, which is LF_PROBE_LATE_MS. Good board readings there were 76 to
- * 110 ppm across several boots, so this will not condemn a working crystal.
+/* Five times the worst mean absolute deviation seen on a good board at
+ * LF_PROBE_LATE_MS, where readings ran 76 to 110 ppm. It will not condemn a
+ * working crystal.
  *
- * What it cannot promise is the other direction. Nothing has been measured on
- * a board whose LF source is genuinely not a crystal, so the false negative
- * rate is unknown: a calibrated LFRC quiet enough to sit under 500 ppm would
- * pass. Closing that needs BICR fault injection or a scope on XL1, both
- * documented in the README.
+ * The false negative rate is unknown. Nothing has been measured on a board whose
+ * LF source is genuinely not a crystal, so a calibrated LFRC quiet enough to sit
+ * under 500 ppm would pass. Closing that needs BICR injection or a scope on XL1,
+ * both covered in the README.
  *
- * Leaving fll16m unconditioned was tried as a cheap substitute and does not
- * work. It shifts the mean by a hundredfold and barely moves the spread, which
- * is the spread check behaving as designed: reference bias is common mode
- * across samples and cancels in the deviation. Good confirmation of the
- * design, useless as a calibration.
- *
- * TODO: tighten this once the settling curve is known. A good board reads 17 to
- * 20 ppm once settled, against 76 to 110 ppm at 5 s, so measuring later would
- * allow a much tighter threshold than five times the early figure.
+ * TODO: tighten once the settling curve is known. A good board reads 17 to
+ * 20 ppm settled, against 76 to 110 ppm at 5 s.
  */
 #define LF_PPM_SPREAD_REJECT 500
 
@@ -101,10 +91,10 @@
  */
 #define LF_MONITOR_PERIOD_MS 3600000
 
-/* Consecutive good readings needed to clear a latched fault. Two, not one: a
- * single good gate after a bad one is as likely to be a marginal crystal
- * drifting back through tolerance as a real recovery, and clearing on it would
- * hide the fault from anything that polls less often than the probe.
+/* Consecutive good readings needed to clear a latched fault. A single good gate
+ * after a bad one is as likely to be a marginal crystal drifting back through
+ * tolerance as a real recovery, and clearing on it would hide the fault from
+ * anything polling less often than the probe.
  */
 #define LF_FAULT_CLEAR_STREAK 2
 
