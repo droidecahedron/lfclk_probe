@@ -147,9 +147,13 @@ checked.
 
 ## a crystal dragged off frequency while running
 
-The one that matters. Scope probe held against the `XL1` pad of `X2`, the
-32.768 kHz crystal, on a board that had been up 28 minutes. Two separate
-contacts:
+Scope probe held against the `XL1` pad of `X2`, the
+32.768 kHz crystal, on a board that had been up 28 minutes.
+
+<img width="420" height="395" alt="image" src="https://github.com/user-attachments/assets/23a90e9e-e3aa-4cdc-ac75-c13d2b6ad1f9" />
+
+<img width="442" height="397" alt="image" src="https://github.com/user-attachments/assets/acd43bf5-c9f7-4fde-8bcc-81f77b3e92ef" />
+
 
 ```
 00:28:31  runtime probe: LF_OK at -2 ppm over 4096 LF ticks
@@ -166,8 +170,7 @@ contacts:
 00:29:11  fault flag cleared after 2 good readings
 ```
 
-Those ppm figures are frequencies. The gate counts HF ticks across a fixed number
-of LF ticks, so a longer window means a slower clock:
+Gate counts HF ticks across a fixed number of LF ticks, so a longer window means a slower clock
 
 | reading | implied LFCLK | share of nominal |
 | --- | --- | --- |
