@@ -48,3 +48,42 @@
 &fll16m {
 	status = "okay";
 };
+
+/*
+ * Fabric for the hardware-gated variant. rtc130 sits on the 0x5f92_0000 bus
+ * (SPU131) and timer130 on 0x5f9a_0000 (SPU134), confirmed by the generated
+ * SPU_PERIPH_PERM entries, so an RTC event reaching a TIMER task has to cross a
+ * PPIB bridge. dppic130 is the hub and takes no link property of its own; the
+ * leaf declares the route and the periphconf generator emits both halves.
+ *
+ * One sink-channels entry on dppic133 produces, per
+ * build/lfclk_probe/zephyr/periphconf_entries_generated.c:
+ *   PERIPHCONF_PPIB_SUBSCRIBE_SEND(ppib130, 16, true)   PPIB130 ch. 16 =>
+ *   PERIPHCONF_PPIB_PUBLISH_RECEIVE(ppib134, 0, true)   PPIB134 ch. 0
+ * which matches offset = <16> on the ppib134 node.
+ *
+ * Do not give the ppib nodes a status. PPIBs are secure domain owned, and
+ * claiming them emits SPU_PERIPH_PERM writes that periphconf-check rejects as
+ * UNRECOGNIZED_REGISTER, which stops the device booting.
+ *
+ * Channels 2 and 3, not 0 and 1: MPSL reserves DPPIC130 channel 0 for itself
+ * (MPSL_RESERVED_DPPI_SINK_CHANNELS in nrf/subsys/mpsl/init/mpsl_init.c), and
+ * this probe is meant to coexist with a radio application. The first channel is
+ * the start boundary, the second the end boundary, read back in C from these
+ * properties so the numbers live in one place.
+ *
+ * The channel index is the same on both sides of the bridge. MPSL relies on the
+ * same thing, enabling matching indices on DPPIC130 and DPPIC132 in
+ * mpsl_init.c. The secure domain no longer enables local-domain DPPI channels,
+ * so the application has to enable both sides itself.
+ */
+&dppic130 {
+	status = "okay";
+	owned-channels = <2 3>;
+};
+
+&dppic133 {
+	status = "okay";
+	owned-channels = <2 3>;
+	sink-channels = <2 3>;
+};

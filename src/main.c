@@ -21,6 +21,11 @@
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/logging/log.h>
 
+#include <nrfx.h>
+#include <hal/nrf_dppi.h>
+#include <hal/nrf_rtc.h>
+#include <hal/nrf_timer.h>
+
 #include "lf_probe.h"
 
 LOG_MODULE_REGISTER(lf_probe, LOG_LEVEL_INF);
@@ -220,25 +225,151 @@ static int lf_gate_measure(uint32_t gate_ticks, struct lf_measurement *out)
 	return 0;
 }
 
-static void lf_gate_report(uint32_t gate_ticks)
+/* Hardware-gated variant. rtc130 COMPARE publishes to timer130 CAPTURE through
+ * DPPI, so both boundaries land on exact LF edges with the CPU uninvolved and
+ * the read-pair latency that biases the software gate disappears.
+ *
+ * Two channels rather than one: a single channel would drive both capture tasks
+ * from both compare events. Channel LF_DPPI_CH_START opens the window,
+ * LF_DPPI_CH_END closes it, and the HF span is one CC subtraction.
+ */
+static void lf_capture_setup(void)
+{
+	/* Publish and subscribe carry a channel index plus an enable bit. The
+	 * PPIB side is already configured by IronSide SE from the UICR
+	 * periphconf the overlay generates, and cannot be touched from here:
+	 * only the secure core may set PPIB direction on this part.
+	 */
+	/* RTC is not TIMER here: an RTC compare event is only generated when the
+	 * matching EVTEN bit is set, so without this the compare matches, nothing
+	 * fires, and the gate times out looking healthy. The Zephyr counter
+	 * driver sets EVTEN only when it hands out an alarm, and the probe sets
+	 * no alarms.
+	 */
+	nrf_rtc_event_enable(NRF_RTC130,
+			     NRF_RTC_CHANNEL_INT_MASK(LF_RTC_CC_START) |
+			     NRF_RTC_CHANNEL_INT_MASK(LF_RTC_CC_END));
+
+	nrf_rtc_publish_set(NRF_RTC130, NRF_RTC_EVENT_COMPARE_0, LF_DPPI_CH_START);
+	nrf_rtc_publish_set(NRF_RTC130, NRF_RTC_EVENT_COMPARE_1, LF_DPPI_CH_END);
+
+	nrf_timer_subscribe_set(NRF_TIMER130, NRF_TIMER_TASK_CAPTURE0, LF_DPPI_CH_START);
+	nrf_timer_subscribe_set(NRF_TIMER130, NRF_TIMER_TASK_CAPTURE1, LF_DPPI_CH_END);
+
+	/* Both ends of the bridge have to be enabled. The event crosses
+	 * DPPIC130 -> PPIB130 ch 16 -> PPIB134 ch 0 -> DPPIC133, and a channel
+	 * left disabled on either side simply drops it.
+	 */
+	nrf_dppi_channels_enable(NRF_DPPIC130, BIT(LF_DPPI_CH_START) | BIT(LF_DPPI_CH_END));
+	nrf_dppi_channels_enable(NRF_DPPIC133, BIT(LF_DPPI_CH_START) | BIT(LF_DPPI_CH_END));
+}
+
+static void lf_capture_teardown(void)
+{
+	nrf_dppi_channels_disable(NRF_DPPIC130, BIT(LF_DPPI_CH_START) | BIT(LF_DPPI_CH_END));
+	nrf_dppi_channels_disable(NRF_DPPIC133, BIT(LF_DPPI_CH_START) | BIT(LF_DPPI_CH_END));
+
+	nrf_rtc_event_disable(NRF_RTC130,
+			      NRF_RTC_CHANNEL_INT_MASK(LF_RTC_CC_START) |
+			      NRF_RTC_CHANNEL_INT_MASK(LF_RTC_CC_END));
+
+	nrf_rtc_publish_clear(NRF_RTC130, NRF_RTC_EVENT_COMPARE_0);
+	nrf_rtc_publish_clear(NRF_RTC130, NRF_RTC_EVENT_COMPARE_1);
+
+	nrf_timer_subscribe_clear(NRF_TIMER130, NRF_TIMER_TASK_CAPTURE0);
+	nrf_timer_subscribe_clear(NRF_TIMER130, NRF_TIMER_TASK_CAPTURE1);
+}
+
+static int lf_capture_measure(uint32_t gate_ticks, struct lf_measurement *out)
+{
+	uint32_t start_cc, end_cc, hf_start, hf_end;
+	int64_t deadline;
+	uint64_t expected_hf;
+
+	nrf_rtc_event_clear(NRF_RTC130, NRF_RTC_EVENT_COMPARE_0);
+	nrf_rtc_event_clear(NRF_RTC130, NRF_RTC_EVENT_COMPARE_1);
+
+	/* Both boundaries armed before either fires, so the window length is
+	 * exactly gate_ticks LF ticks regardless of when the CPU gets around to
+	 * looking. LF_CAPTURE_ARM_TICKS of lead time keeps the first compare in
+	 * the future while these writes land.
+	 */
+	start_cc = nrf_rtc_counter_get(NRF_RTC130) + LF_CAPTURE_ARM_TICKS;
+	end_cc = start_cc + gate_ticks;
+
+	nrf_rtc_cc_set(NRF_RTC130, LF_RTC_CC_START, start_cc & NRF_RTC_COUNTER_MAX);
+	nrf_rtc_cc_set(NRF_RTC130, LF_RTC_CC_END, end_cc & NRF_RTC_COUNTER_MAX);
+
+	/* Same reasoning as the software gate: never sleep, so k_uptime_get()
+	 * keeps running off the 16 MHz clock even with LFCLK stopped.
+	 */
+	deadline = k_uptime_get() +
+		   ((int64_t)(gate_ticks + LF_CAPTURE_ARM_TICKS) * MSEC_PER_SEC) / LF_NOMINAL_HZ +
+		   LF_CAPTURE_TIMEOUT_MS;
+
+	while (!nrf_rtc_event_check(NRF_RTC130, NRF_RTC_EVENT_COMPARE_1)) {
+		if (k_uptime_get() > deadline) {
+			return -ETIMEDOUT;
+		}
+	}
+
+	/* A closing capture without an opening one means the bridge is passing
+	 * nothing on the start channel, which is a wiring fault rather than a
+	 * clock fault and must not be reported as a ppm figure.
+	 */
+	if (!nrf_rtc_event_check(NRF_RTC130, NRF_RTC_EVENT_COMPARE_0)) {
+		return -EIO;
+	}
+
+	hf_start = nrf_timer_cc_get(NRF_TIMER130, LF_TIMER_CC_START);
+	hf_end = nrf_timer_cc_get(NRF_TIMER130, LF_TIMER_CC_END);
+
+	out->lf_ticks = gate_ticks;
+	out->hf_ticks = counter_delta(counter_get_top_value(hf_counter), hf_start, hf_end);
+
+	if (out->hf_ticks == 0) {
+		return -EIO;
+	}
+
+	out->lf_hz = (uint32_t)(((uint64_t)out->lf_ticks *
+				 counter_get_frequency(hf_counter)) / out->hf_ticks);
+
+	expected_hf = ((uint64_t)out->lf_ticks *
+		       counter_get_frequency(hf_counter)) / LF_NOMINAL_HZ;
+	if (expected_hf == 0) {
+		return -EIO;
+	}
+
+	out->ppm = (int32_t)((((int64_t)expected_hf - (int64_t)out->hf_ticks) *
+			      1000000) / (int64_t)expected_hf);
+
+	return 0;
+}
+
+/* Both variants report through here so the two are directly comparable on the
+ * bench, which is the only way to see whether the capture actually tightened
+ * anything.
+ */
+static void lf_gate_report(const char *label, uint32_t gate_ticks,
+			   int (*measure)(uint32_t, struct lf_measurement *))
 {
 	struct lf_measurement meas;
 	int err;
 
 	for (int i = 0; i < LF_GATE_REPEATS; i++) {
-		err = lf_gate_measure(gate_ticks, &meas);
+		err = measure(gate_ticks, &meas);
 		if (err == -ETIMEDOUT) {
-			LOG_ERR("gate %u: never closed, LFCLK is not advancing", gate_ticks);
+			LOG_ERR("%s %u: never closed, LFCLK is not advancing", label, gate_ticks);
 			return;
 		}
 
 		if (err) {
-			LOG_ERR("gate %u: failed (err %d)", gate_ticks, err);
+			LOG_ERR("%s %u: failed (err %d)", label, gate_ticks, err);
 			return;
 		}
 
-		LOG_INF("gate %5u LF : %8u HF, %6u Hz, %5d ppm",
-			meas.lf_ticks, meas.hf_ticks, meas.lf_hz, meas.ppm);
+		LOG_INF("%s %5u LF : %8u HF, %6u Hz, %5d ppm",
+			label, meas.lf_ticks, meas.hf_ticks, meas.lf_hz, meas.ppm);
 
 		if (meas.ppm > LF_PPM_NOISE_FLOOR || meas.ppm < -LF_PPM_NOISE_FLOOR) {
 			LOG_WRN("%d ppm is outside the %d ppm reference noise floor",
@@ -319,8 +450,18 @@ int main(void)
 		return err;
 	}
 
-	lf_gate_report(LF_GATE_TICKS_LONG);
-	lf_gate_report(LF_GATE_TICKS_SHORT);
+	lf_gate_report("soft", LF_GATE_TICKS_LONG, lf_gate_measure);
+	lf_gate_report("soft", LF_GATE_TICKS_SHORT, lf_gate_measure);
+
+	/* Kept alongside the software gate rather than replacing it. The bridge
+	 * is the part most likely to be wrong on a board or SoC variant, and a
+	 * capture that never fires reports -ETIMEDOUT rather than hanging, so the
+	 * software figures stay available as the fallback.
+	 */
+	lf_capture_setup();
+	lf_gate_report("cap ", LF_GATE_TICKS_LONG, lf_capture_measure);
+	lf_gate_report("cap ", LF_GATE_TICKS_SHORT, lf_capture_measure);
+	lf_capture_teardown();
 
 	/* Released whatever the gates reported. Holding HFXO past the
 	 * measurement only burns current.

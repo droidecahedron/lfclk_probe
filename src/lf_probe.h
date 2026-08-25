@@ -47,4 +47,28 @@
  */
 #define LF_PPM_NOISE_FLOOR 50
 
+/* Lead time between arming the two compare values and the first one firing.
+ * One LF tick is 30.5 us, so four is roughly 122 us, comfortably more than two
+ * CC register writes even if something preempts between them. Too small and the
+ * start boundary is already in the past and never fires.
+ */
+#define LF_CAPTURE_ARM_TICKS 4
+
+/* DPPI channels for the captured gate, read back from the overlay so the
+ * numbers are declared once. The first opens the window, the second closes it.
+ */
+#define LF_DPPI_CH_START DT_PROP_BY_IDX(DT_NODELABEL(dppic133), sink_channels, 0)
+#define LF_DPPI_CH_END   DT_PROP_BY_IDX(DT_NODELABEL(dppic133), sink_channels, 1)
+
+/* rtc130 CC channels publishing the two boundaries, and the timer130 CC
+ * channels capturing them. Both peripherals are also bound to Zephyr counter
+ * devices, which hand these same channels out for alarms, so the probe sets no
+ * alarms and owns these outright. rtc130 has cc-num = 4 and timer130 cc-num = 6,
+ * so nothing else is squeezed out.
+ */
+#define LF_RTC_CC_START   0
+#define LF_RTC_CC_END     1
+#define LF_TIMER_CC_START 0
+#define LF_TIMER_CC_END   1
+
 #endif /* LF_PROBE_H_ */
