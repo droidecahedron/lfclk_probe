@@ -192,7 +192,7 @@ interval, 5 s here.
 
 ## an LF counter that is not advancing
 
-`counter_stop(rtc130)`, so the counter genuinely does not tick. To a gate that is
+`counter_stop(rtc130)`, so the counter does not tick. To a gate that is
 indistinguishable from a dead `LFCLK`: the value never changes.
 
 ```
@@ -202,15 +202,14 @@ indistinguishable from a dead `LFCLK`: the value never changes.
 [00:00:12.624,996] <wrn> lf_probe: late probe: LF_ABSENT, no gate closed
 ```
 
-Read the timestamps. The early probe reports at 6.62 s rather than 1.62 s because
-it tried the captured gate, timed out at 3 s, fell back to the software gate, and
-timed out again. `LF_ABSENT` costs about 6 s per probe and needs both gates to
+The early probe reports at 6.62 s. It tried the captured gate, timed out at 3 s,
+fell back to the software gate, and timed out again. `LF_ABSENT` costs about 6 s per probe and needs both gates to
 fail, which is the discriminator doing its job.
 
 The late probe ran back to back at 12.62 s instead of being skipped, because its
 absolute 5 s deadline had already passed when the early probe finished.
 
-> A genuinely stopped `LFCLK` cannot be produced from inside. It stops the CPU and
+> A stopped `LFCLK` cannot be produced from inside. It stops the CPU and
 > no application code runs, so that one is recognition only. `LF_ABSENT` exists to
 > report a non-advancing LF counter as a verdict rather than hanging or printing a
 > number it never measured.
@@ -249,10 +248,9 @@ and `LFCLK` runs on the internal RC with autocalibration on.
 [00:00:06.091,191] <err> lf_probe: fault flag latched: LF_WRONG_SRC
 ```
 
-`LF_WRONG_SRC` on a clock whose mean error is 1 ppm. That is the whole point: a
-calibrated `LFRC` on this DK reads better than the crystal does in absolute
-terms, so it clears `LF_PPM_REJECT` at 2000 ppm with three decades to spare and
-would clear anything the reference itself can resolve. The spread is what condemns it, and it feeds the verdict and the fault
+`LF_WRONG_SRC` on a clock whose mean error is 1 ppm. A calibrated `LFRC` on this
+DK reads better than the crystal in absolute terms and clears `LF_PPM_REJECT` by
+three decades. The spread is what condemns it, and it feeds the verdict and the fault
 latch rather than only printing a warning.
 
 Both sides, one DK, room temperature, spread taken inside the probe:
@@ -282,9 +280,9 @@ differing by 8x agree. Five repeats each, `fll16m` held at 30 ppm.
 | captured, 32768 LF | -7 ppm | 2 HF ticks, 0.125 ppm |
 | captured, 4096 LF | -7 ppm | 1 HF tick, 0.5 ppm |
 
-The captured gates agree to the digit at both lengths, which is what tells you
-the residual is a real frequency offset. The software gate doesn't, because it
-carries a fixed read-pair latency:
+The captured gates agree to the digit at both lengths, so the residual is a real
+frequency offset. The software gate does not, because it carries a fixed
+read-pair latency:
 
 | gate | expected HF | mean actual | shortfall |
 | --- | --- | --- | --- |
@@ -292,13 +290,13 @@ carries a fixed read-pair latency:
 | 4096 LF | 2000000 | 1999858 | -142 ticks, 8.9 us |
 
 Same absolute shortfall either way. A fixed time error scales as 1/gate-length
-in ppm, so 99 ticks of 16e6 is 6 ppm and 142 of 2e6 is 71 ppm. That is the whole
-argument for the DPPI gate.
+in ppm, so 99 ticks of 16e6 is 6 ppm and 142 of 2e6 is 71 ppm. The DPPI gate
+removes that offset.
 
-> The software rows come from the commit that added them and the captured rows
-> from the commit after, so this is two campaigns rather than one sitting. The
-> read-pair latency accounts for about 6 of the 13 ppm between the two long-gate
-> means; the rest is unexplained and inside the reference's own 30 ppm.
+> The software rows and the captured rows come from different commits, so these
+> are two measurement campaigns. Read-pair latency accounts for about 6 of the
+> 13 ppm between the two long-gate means. The remainder is unexplained and sits
+> inside the reference's own 30 ppm.
 
 # Software Description
 
@@ -410,9 +408,9 @@ clock parent as `NRF_PERIPH_GET_FREQUENCY(node) / BIT(prescaler)`, which is what
 Needed to calibrate the spread threshold, and a `BICR` edit is the only way. A
 runtime request gets subsumed by arbitration, as above.
 
-Declare `lfosc.source: LFRC` with autocalibration on. That is how a board built
-without a 32 kHz crystal is configured, so it is a supported path and it gives
-you the hard case: a calibrated RC sitting near nominal. `EXT_SQUARE` rests on an
+Declare `lfosc.source: LFRC` with autocalibration on. A board built without a
+32 kHz crystal is configured that way, so the path is supported and it gives you
+the hard case: a calibrated RC sitting near nominal. `EXT_SQUARE` rests on an
 assumption about the crystal amplifier that the nRF54H20 PS was not available to
 confirm.
 
@@ -446,6 +444,28 @@ not matter.
 
 Restore was verified byte-identical to the backup, and the crystal read -6 ppm
 with 20 to 30 ppm of spread afterwards across six boots.
+
+## EXT_SQUARE does not stop a fitted crystal
+
+The handoff uses `BICR` `lfosc.lfxo.mode: EXT_SQUARE` with nothing driving XL1 as
+its fault injection, on the reasoning that the amplifier gets bypassed. Measured
+on nRF54H20 with the crystal still fitted:
+
+| config | mean | spread MAD |
+| --- | --- | --- |
+| stock `CRYSTAL` | -2 to -9 ppm | 14 to 35 ppm |
+| `EXT_SQUARE`, load caps off | +7 to +8 ppm | 50 to 59 ppm |
+
+The oscillator kept running and five runtime probes returned `LF_OK`. Dropping
+`builtInLoadCapacitors` removes the internal load capacitance, which pulls the
+crystal about 12 ppm and doubles its spread.
+
+For a non-crystal `LFCLK` use `lfosc.source: LFRC`. `LF_PPM_SPREAD_REJECT` is
+calibrated against that.
+
+> `bicrgen.py` reads `builtInLoadCapacitors` whatever the mode, while the schema
+> only requires it under `CRYSTAL`. An `EXT_SQUARE` config without it dies on a
+> KeyError.
 
 ## reading the log
 
@@ -517,10 +537,9 @@ the worst of five, because the log backend is still draining.
 ## what this can't detect
 
 A crystal that degrades while running does **not** trigger a fallback to `LFRC`
-on this part. Measured: pulled to 61% of nominal and the system stayed on it, no
-handover, no complaint from anything but this probe. That was an open question in
-the handoff and it is now settled in the direction that makes the probe
-necessary.
+on this part. Measured at 61% of nominal with the system still running on it, no
+handover, no complaint from anything but this probe. The handoff left that
+open.
 
 What is still open is a crystal that stops completely. Probe loading was not
 enough to kill oscillation, only to drag it, so that branch is untested. If it
@@ -528,8 +547,8 @@ does stop, the monitor thread cannot report it: `k_sleep()` parks on the system
 timer and GRTC SYSCOUNTER falls back to `LFCLK` while asleep, so the CPU never
 wakes. Silence on the console is the signature.
 
-The spread check is what catches a calibrated `LFRC`, and it is measured from
-both sides, but on one DK at room temperature. The crystal side threw one 58 ppm
+The spread check catches a calibrated `LFRC`. It is measured from both sides, on
+one DK at room temperature. The crystal side threw one 58 ppm
 boot against a 19 to 29 ppm cluster, so re-check the margins over temperature and
 on a second board before trusting them.
 
