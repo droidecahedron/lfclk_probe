@@ -698,9 +698,10 @@ int main(void)
 
 	LOG_INF("lf_probe on %s", CONFIG_BOARD_TARGET);
 
-	/* Declared modes, straight from nrf54h20.dtsi. There is deliberately
-	 * no lfxo row here : the LFXO node carries no accuracy property
-	 * the 20ppm seen resolved by clock_control originates in BICR.
+	/* Declared modes, straight from nrf54h20.dtsi. There is deliberately no
+	 * lfxo row: the LFXO node carries no accuracy property, and the 20 ppm
+	 * that clock_control resolves originates in BICR instead. Printing these
+	 * shows the gap the probe exists to close.
 	 */
 	LOG_INF("lfclk nominal      : %u Hz", DT_PROP(LFCLK_NODE, clock_frequency));
 	LOG_INF("lfrc   declared    : %u ppm, %u us startup",
@@ -709,7 +710,6 @@ int main(void)
 	LOG_INF("lflprc declared    : %u ppm, %u us startup",
 		DT_PROP(LFCLK_NODE, lflprc_accuracy_ppm),
 		DT_PROP(LFCLK_NODE, lflprc_startup_time_us));
-		// TODO: BICR mod
 
 	if (!device_is_ready(lf_counter)) {
 		LOG_ERR("%s not ready", lf_counter->name);
