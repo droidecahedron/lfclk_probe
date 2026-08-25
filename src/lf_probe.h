@@ -28,8 +28,8 @@
  * That only holds for the captured gate, where the window is exactly gate_ticks
  * wide. The software gate derives its expected count from the observed tick
  * delta, which overshoots, so its division truncates by up to one HF tick. That
- * is 0.06 ppm on the long gate, and it is why the captured gate is the one the
- * verdict trusts. main.c asserts the multiples at build time.
+ * is 0.06 ppm on the long gate. The verdict trusts the captured gate for that
+ * reason. main.c asserts the multiples at build time.
  */
 #define LF_GATE_TICKS_LONG   32768 /* 1 s, expected 16000000 HF ticks exactly */
 #define LF_GATE_TICKS_SHORT  4096  /* 125 ms, expected 2000000 HF ticks exactly */

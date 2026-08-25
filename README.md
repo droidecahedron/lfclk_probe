@@ -27,6 +27,53 @@ Software
 `HFXO` straight through. `RTC COMPARE` opens and closes a window of known length
 in LF ticks, and the HF ticks inside that window give you the ratio.
 
+In short: open a window a known number of LFCLK ticks wide, count HFCLK ticks
+inside it, and compare against what the count should be.
+
+```
+  rtc130    counts the 32 kHz you do not trust
+  timer130  counts the 16 MHz you do
+
+  window 32768 LF ticks wide, expect 16000000 HF ticks
+
+     got 16000000   clock is right
+     got 26000000   clock is slow, by the ratio
+     never closed   clock is not advancing
+```
+
+What the boot sequence does:
+
+```
+  boot
+   |
+   +-- log what devicetree claims        32768 Hz, BICR says 20 ppm
+   +-- condition the reference           ask fll16m for its best, get 30 ppm
+   |
+   +-- 600 ms   long gate, mean only     dead or just slow to start?
+   +-- 5 s      long gate + 64 short     past the LFXO calibration window
+   |
+   +-- every hour, short gate + 64 short
+```
+
+How one probe decides:
+
+```
+  captured gate
+   |
+   +-- worked
+   |     |
+   |     +-- mean off by more than 2000 ppm?  yes -> LF_WRONG_SRC
+   |     +-- spread over 150 ppm?             yes -> LF_WRONG_SRC
+   |     +-- neither                              -> LF_OK
+   |
+   +-- failed
+         |
+         +-- software gate failed too  -> LF_ABSENT  clock not advancing
+         +-- software gate fine        -> -EIO       routing broken, clock fine
+```
+
+A bad verdict latches a fault flag. Two good readings clear it.
+
 The two counters sit on different peripheral buses, so the event crosses a PPIB
 bridge:
 
@@ -105,6 +152,7 @@ What produced each one:
 | `LF_OK` | crystal running | stock `BICR`, 14 boots |
 | `LF_WRONG_SRC` | RC source | `BICR` `lfosc.source: LFRC`, 9 boots |
 | `LF_ABSENT` | LF counter not advancing | `counter_stop(rtc130)` |
+| `-EIO` | event route broken, clock fine | `rtc130` CC contention clearing `EVTEN` |
 
 ## a healthy board
 
@@ -217,6 +265,25 @@ absolute 5 s deadline had already passed when the early probe finished.
 > report a non-advancing LF counter as a verdict rather than hanging or printing a
 > number it never measured.
 
+## a broken event route
+
+`-EIO` rather than a verdict. Produced by giving a second consumer a `rtc130` CC
+channel: the Zephyr counter driver manages `EVTEN` for its own alarms and cleared
+the `COMPARE` enables the captured gate needs.
+
+```
+capture failed (err -5) but the software gate read -12 ppm: DPPI route fault, not a clock fault
+early probe: undetermined (err -5)
+```
+
+The captured gate died, the software gate read a healthy clock, so the probe
+reports the route rather than condemning the crystal. Cause here was register
+contention rather than a broken bridge, and the branch behaves the same either
+way.
+
+> Do not share `rtc130` or `timer130` with anything else. They are the
+> measurement pair. `rtc131` and `timer131` are free and run on the same clocks.
+
 ## the fault latch clearing
 
 The RC board never recovers, so clearing needs a fault that goes away.
@@ -260,15 +327,15 @@ Both sides, one DK, room temperature, spread taken inside the probe:
 
 | condition | mean at late probe | spread MAD | verdict |
 | --- | --- | --- | --- |
-| crystal, 14 boots | -6 to -7 ppm | 19 to 58 ppm | `LF_OK`, nothing latched |
-| LFRC, 9 boots | -33 to +56 ppm | 248 to 622 ppm | `LF_WRONG_SRC`, latched |
+| crystal, 14 boots | -6 to -7 ppm | 19-58 ppm | `LF_OK`, nothing latched |
+| LFRC, 9 boots | -33 to +56 ppm | 248-622 ppm | `LF_WRONG_SRC`, latched |
 
 The mean overlaps completely. MAD separates by 4.3x, which is where the 150 ppm
 threshold comes from: 2.6x above the worst crystal reading, 1.65x below the
 quietest RC one.
 
 > Measure the spread inside the probe, right after the gate. An earlier version
-> ran it from a fresh `lf_ref_acquire()` and read 76 to 110 ppm on the same
+> ran it from a fresh `lf_ref_acquire()` and read 76-110 ppm on the same
 > crystal, because it was measuring the HFXO ramp along with the LF source.
 
 ## proof the measurement is real
@@ -279,7 +346,7 @@ differing by 8x agree. Five repeats each, `fll16m` held at 30 ppm.
 | gate | mean | spread |
 | --- | --- | --- |
 | software, 32768 LF (1 s) | +6 ppm | 24 ppm |
-| software, 4096 LF (125 ms) | +71 to +84 ppm | 26 to 30 ppm |
+| software, 4096 LF (125 ms) | +71 to +84 ppm | 26-30 ppm |
 | captured, 32768 LF | -7 ppm | 2 HF ticks, 0.125 ppm |
 | captured, 4096 LF | -7 ppm | 1 HF tick, 0.5 ppm |
 
@@ -448,7 +515,7 @@ not matter.
 > it first. `../bicr_backup/IFYOUBRICKEDUSETHISBICR.txt` has the recovery path.
 
 Restore was verified byte-identical to the backup, and the crystal read -6 ppm
-with 20 to 30 ppm of spread afterwards across six boots.
+with 20-30 ppm of spread afterwards across six boots.
 
 ## EXT_SQUARE does not stop a fitted crystal
 
@@ -458,8 +525,8 @@ on nRF54H20 with the crystal still fitted:
 
 | config | mean | spread MAD |
 | --- | --- | --- |
-| stock `CRYSTAL` | -2 to -9 ppm | 14 to 35 ppm |
-| `EXT_SQUARE`, load caps off | +7 to +8 ppm | 50 to 59 ppm |
+| stock `CRYSTAL` | -2 to -9 ppm | 14-35 ppm |
+| `EXT_SQUARE`, load caps off | +7 to +8 ppm | 50-59 ppm |
 
 The oscillator kept running and five runtime probes returned `LF_OK`. Dropping
 `builtInLoadCapacitors` removes the internal load capacitance, which pulls the
@@ -504,12 +571,12 @@ these figures carry an HFXO ramp the in-probe version does not:
 
 | measured at | mad | range |
 | --- | --- | --- |
-| 20 ms | 3 to 7 HF ticks | 41 and 220 HF ticks |
-| 5 s | 1 HF tick, 76 to 110 ppm | 9 to 19 HF ticks |
-| 12 s | 0 HF ticks, 17 to 20 ppm | 2 to 3 HF ticks |
+| 20 ms | 3-7 HF ticks | 41 and 220 HF ticks |
+| 5 s | 1 HF tick, 76-110 ppm | 9-19 HF ticks |
+| 12 s | 0 HF ticks, 17-20 ppm | 2-3 HF ticks |
 
 Taken inside the probe on this build, straight after the 1 s gate, the same
-crystal reads 19 to 58 ppm and 2 to 5 ticks at the 5 s probe. The 220 tick range
+crystal reads 19-58 ppm and 2 to 5 ticks at the 5 s probe. The 220 tick range
 at 20 ms is what the early probe would be judging.
 
 ```

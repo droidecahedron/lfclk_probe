@@ -248,7 +248,7 @@ static int lf_gate_measure(uint32_t gate_ticks, struct lf_measurement *out)
 	out->hf_ticks = counter_delta(hf_top, hf_start, hf_now);
 
 	/* A stalled HF side makes the ratio meaningless rather than merely
-	 * wrong, so it is worth separating from a bad reading.
+	 * wrong. Separate it from a bad reading.
 	 */
 	if (out->hf_ticks == 0) {
 		return -EIO;
@@ -399,8 +399,8 @@ static int lf_capture_measure(uint32_t gate_ticks, struct lf_measurement *out)
  * corrects the average and cannot correct the jitter.
  *
  * The reference's own bias is common mode across every sample and cancels in
- * the deviation, so this is tighter than the absolute figure despite each gate
- * being 1000 times shorter.
+ * the deviation. That makes it tighter than the absolute figure despite each
+ * gate being 1000 times shorter.
  *
  * Mean absolute deviation rather than variance: no squaring, so no risk of
  * overflow and no temptation to reach for a square root. All integer.
