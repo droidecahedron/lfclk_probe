@@ -378,6 +378,68 @@ static void lf_gate_report(const char *label, uint32_t gate_ticks,
 	}
 }
 
+static const char *lf_verdict_str(enum lf_verdict verdict)
+{
+	switch (verdict) {
+	case LF_OK:
+		return "LF_OK";
+	case LF_WRONG_SRC:
+		return "LF_WRONG_SRC";
+	case LF_ABSENT:
+		return "LF_ABSENT";
+	default:
+		return "?";
+	}
+}
+
+/* Turns a measurement into a state, which is what a caller can act on.
+ *
+ * LF_ABSENT is not an error path. Whether a dead crystal parks the SoC on LFRC
+ * or leaves LFCLK stopped is unconfirmed on this part, so both are reported
+ * without assuming which happens.
+ *
+ * The captured gate is tried first because it is the accurate one, but a
+ * capture timeout on its own does not mean the clock is dead: a misconfigured
+ * bridge produces the identical -ETIMEDOUT, which is exactly how the missing
+ * EVTEN bit presented on the bench. So LF_ABSENT is only returned when the
+ * software gate fails too. A capture that times out while the software gate
+ * still reads a healthy clock is a fabric fault, and this returns an errno for
+ * that rather than condemning good hardware.
+ *
+ * @retval 0       Verdict determined, written to @p verdict.
+ * @retval -EIO    Fabric fault. The clock is running, the capture path is not.
+ * @retval negative Other measurement failure.
+ */
+static int lf_verdict_get(uint32_t gate_ticks, enum lf_verdict *verdict,
+			  struct lf_measurement *meas)
+{
+	int cap_err;
+	int soft_err;
+
+	cap_err = lf_capture_measure(gate_ticks, meas);
+	if (cap_err == 0) {
+		*verdict = (meas->ppm > LF_PPM_REJECT || meas->ppm < -LF_PPM_REJECT)
+			 ? LF_WRONG_SRC : LF_OK;
+		return 0;
+	}
+
+	soft_err = lf_gate_measure(gate_ticks, meas);
+	if (soft_err == -ETIMEDOUT) {
+		/* Neither gate closed. The clock itself is not advancing. */
+		*verdict = LF_ABSENT;
+		return 0;
+	}
+
+	if (soft_err) {
+		return soft_err;
+	}
+
+	LOG_ERR("capture failed (err %d) but the software gate read %d ppm: "
+		"fabric fault, not a clock fault", cap_err, meas->ppm);
+
+	return -EIO;
+}
+
 static int lf_ref_release(void)
 {
 	int err;
@@ -397,6 +459,8 @@ static int lf_ref_release(void)
 
 int main(void)
 {
+	struct lf_measurement meas;
+	enum lf_verdict verdict;
 	int err;
 
 	LOG_INF("lf_probe on %s", CONFIG_BOARD_TARGET);
@@ -461,6 +525,17 @@ int main(void)
 	lf_capture_setup();
 	lf_gate_report("cap ", LF_GATE_TICKS_LONG, lf_capture_measure);
 	lf_gate_report("cap ", LF_GATE_TICKS_SHORT, lf_capture_measure);
+
+	err = lf_verdict_get(LF_GATE_TICKS_LONG, &verdict, &meas);
+	if (err) {
+		LOG_ERR("verdict undetermined (err %d)", err);
+	} else if (verdict == LF_ABSENT) {
+		LOG_WRN("verdict %s: no gate closed", lf_verdict_str(verdict));
+	} else {
+		LOG_INF("verdict %s at %d ppm, reject threshold %d ppm",
+			lf_verdict_str(verdict), meas.ppm, LF_PPM_REJECT);
+	}
+
 	lf_capture_teardown();
 
 	/* Released whatever the gates reported. Holding HFXO past the

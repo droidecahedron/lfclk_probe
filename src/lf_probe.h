@@ -47,6 +47,14 @@
  */
 #define LF_PPM_NOISE_FLOOR 50
 
+/* Above this, the LF source is not a crystal. Deliberately loose: lfclk
+ * declares lflprc-accuracy-ppm at exactly 1000, so any threshold at or below
+ * that sits on top of a legal mode. An uncalibrated LFRC is off by percent, so
+ * 2000 keeps two decades of margin either side. It does not catch a calibrated
+ * LFRC sitting near nominal, which is what the spread check is for.
+ */
+#define LF_PPM_REJECT 2000
+
 /* Lead time between arming the two compare values and the first one firing.
  * One LF tick is 30.5 us, so four is roughly 122 us, comfortably more than two
  * CC register writes even if something preempts between them. Too small and the
@@ -70,5 +78,15 @@
 #define LF_RTC_CC_END     1
 #define LF_TIMER_CC_START 0
 #define LF_TIMER_CC_END   1
+
+/** @brief What the probe concluded about LFCLK. */
+enum lf_verdict {
+	/** Ratio within tolerance. A crystal is present and running. */
+	LF_OK,
+	/** Ratio off by more than LF_PPM_REJECT. Running on an RC source. */
+	LF_WRONG_SRC,
+	/** Gate never completed. LFCLK is not advancing at all. */
+	LF_ABSENT,
+};
 
 #endif /* LF_PROBE_H_ */
