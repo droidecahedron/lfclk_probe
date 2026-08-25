@@ -21,6 +21,8 @@
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/logging/log.h>
 
+#include "lf_probe.h"
+
 LOG_MODULE_REGISTER(lf_probe, LOG_LEVEL_INF);
 
 #define LFCLK_NODE DT_NODELABEL(lfclk)
@@ -116,6 +118,135 @@ static int lf_ref_acquire(void)
 	return 0;
 }
 
+struct lf_measurement {
+	uint32_t lf_ticks; /* LF ticks the gate actually spanned */
+	uint32_t hf_ticks; /* HF ticks counted across the same window */
+	uint32_t lf_hz;    /* LF frequency implied by the ratio */
+	int32_t ppm;       /* signed error of lf_hz against LF_NOMINAL_HZ */
+};
+
+/* Counters wrap at their top value, which is not always 2^n - 1, so the span
+ * has to close modulo top + 1 rather than by masking. The 64 bit intermediate
+ * is there because top is 0xFFFFFFFF on timer130 and top + 1 would overflow.
+ */
+static uint32_t counter_delta(uint32_t top, uint32_t start, uint32_t now)
+{
+	if (now >= start) {
+		return now - start;
+	}
+
+	return (uint32_t)((uint64_t)now + (uint64_t)top + 1U - (uint64_t)start);
+}
+
+/* Software gate. Polls the LF counter and reads the HF counter the moment the
+ * window closes, so the error is one pair of register reads instead of a sleep
+ * granularity. The busy wait is deliberate: k_sleep() parks on the system
+ * timer, and GRTC SYSCOUNTER falls back to LFCLK while asleep, which is the
+ * clock under test. Thread and ISR jitter still land inside the measurement,
+ * so 100 us of it over a 1 s gate is 100 ppm of error.
+ */
+static int lf_gate_measure(uint32_t gate_ticks, struct lf_measurement *out)
+{
+	const uint32_t lf_top = counter_get_top_value(lf_counter);
+	const uint32_t hf_top = counter_get_top_value(hf_counter);
+	const uint32_t hf_hz = counter_get_frequency(hf_counter);
+	uint32_t lf_start, lf_now, hf_start, hf_now;
+	uint32_t lf_delta;
+	int64_t deadline;
+	uint64_t expected_hf;
+	int err;
+
+	err = counter_get_value(lf_counter, &lf_start);
+	if (err) {
+		return err;
+	}
+
+	err = counter_get_value(hf_counter, &hf_start);
+	if (err) {
+		return err;
+	}
+
+	/* The gate's own expected duration plus the margin. k_uptime_get() is
+	 * safe to lean on with LFCLK stopped because SYSCOUNTER runs off the
+	 * 16 MHz clock whenever the core is awake, and this loop never sleeps.
+	 */
+	deadline = k_uptime_get() +
+		   ((int64_t)gate_ticks * MSEC_PER_SEC) / LF_NOMINAL_HZ +
+		   LF_CAPTURE_TIMEOUT_MS;
+
+	do {
+		if (k_uptime_get() > deadline) {
+			return -ETIMEDOUT;
+		}
+
+		err = counter_get_value(lf_counter, &lf_now);
+		if (err) {
+			return err;
+		}
+
+		lf_delta = counter_delta(lf_top, lf_start, lf_now);
+	} while (lf_delta < gate_ticks);
+
+	err = counter_get_value(hf_counter, &hf_now);
+	if (err) {
+		return err;
+	}
+
+	out->lf_ticks = lf_delta;
+	out->hf_ticks = counter_delta(hf_top, hf_start, hf_now);
+
+	/* A stalled HF side makes the ratio meaningless rather than merely
+	 * wrong, so it is worth separating from a bad reading.
+	 */
+	if (out->hf_ticks == 0) {
+		return -EIO;
+	}
+
+	/* lf_ticks * hf_hz reaches 32768 * 16e6, so 64 bits is not optional. */
+	out->lf_hz = (uint32_t)(((uint64_t)out->lf_ticks * hf_hz) / out->hf_ticks);
+
+	expected_hf = ((uint64_t)out->lf_ticks * hf_hz) / LF_NOMINAL_HZ;
+	if (expected_hf == 0) {
+		return -EIO;
+	}
+
+	/* Compared as HF counts rather than as frequencies so there is only one
+	 * division and one rounding. A slow LFCLK spends more HF ticks inside
+	 * the same number of LF ticks, which comes out negative.
+	 */
+	out->ppm = (int32_t)((((int64_t)expected_hf - (int64_t)out->hf_ticks) *
+			      1000000) / (int64_t)expected_hf);
+
+	return 0;
+}
+
+static void lf_gate_report(uint32_t gate_ticks)
+{
+	struct lf_measurement meas;
+	int err;
+
+	for (int i = 0; i < LF_GATE_REPEATS; i++) {
+		err = lf_gate_measure(gate_ticks, &meas);
+		if (err == -ETIMEDOUT) {
+			LOG_ERR("gate %u: never closed, LFCLK is not advancing", gate_ticks);
+			return;
+		}
+
+		if (err) {
+			LOG_ERR("gate %u: failed (err %d)", gate_ticks, err);
+			return;
+		}
+
+		LOG_INF("gate %5u LF : %8u HF, %6u Hz, %5d ppm",
+			meas.lf_ticks, meas.hf_ticks, meas.lf_hz, meas.ppm);
+
+		if (meas.ppm > LF_PPM_NOISE_FLOOR || meas.ppm < -LF_PPM_NOISE_FLOOR) {
+			LOG_WRN("%d ppm is outside the %d ppm reference noise floor",
+				meas.ppm, LF_PPM_NOISE_FLOOR);
+		}
+	}
+}
+
 static int lf_ref_release(void)
 {
 	int err;
@@ -171,13 +302,28 @@ int main(void)
 	LOG_INF("lf counter %s : %u Hz", lf_counter->name, counter_get_frequency(lf_counter));
 	LOG_INF("hf counter %s : %u Hz", hf_counter->name, counter_get_frequency(hf_counter));
 
+	err = counter_start(lf_counter);
+	if (err) {
+		LOG_ERR("%s start failed (err %d)", lf_counter->name, err);
+		return err;
+	}
+
+	err = counter_start(hf_counter);
+	if (err) {
+		LOG_ERR("%s start failed (err %d)", hf_counter->name, err);
+		return err;
+	}
+
 	err = lf_ref_acquire();
 	if (err) {
 		return err;
 	}
 
-	/* Nothing measures yet, so hand it straight back. Once the gate exists
-	 * the release moves to the far side of it.
+	lf_gate_report(LF_GATE_TICKS_LONG);
+	lf_gate_report(LF_GATE_TICKS_SHORT);
+
+	/* Released whatever the gates reported. Holding HFXO past the
+	 * measurement only burns current.
 	 */
 	err = lf_ref_release();
 	if (err) {
