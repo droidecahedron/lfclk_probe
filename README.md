@@ -105,7 +105,6 @@ What produced each one:
 | `LF_OK` | crystal running | stock `BICR`, 14 boots |
 | `LF_WRONG_SRC` | RC source | `BICR` `lfosc.source: LFRC`, 9 boots |
 | `LF_ABSENT` | LF counter not advancing | `counter_stop(rtc130)` |
-| `-EIO` | DPPI route broken, clock fine | `nrf_rtc_event_enable()` omitted |
 
 ## a healthy board
 
@@ -126,8 +125,25 @@ Stock `BICR`, crystal fitted and working.
 [00:00:06.091,362] <inf> lf_probe: late spread 64 gates of 32 LF : mean 15625 HF, mad 0 HF (30 ppm), range 3 HF (192 ppm)
 ```
 
-This board's `LFXO` runs 6 to 8 ppm slow, inside its 20 ppm `BICR` claim. Across
-14 boots the spread stayed between 19 and 58 ppm against a 150 ppm threshold.
+The ratio sits within 8 ppm of nominal across 14 boots, and the spread between
+19 and 58 ppm against a 150 ppm threshold. Do not read the 8 ppm as the `LFXO`'s
+error: `fll16m` resolves at 30 ppm, so the reference contributes more uncertainty
+than the figure itself. What this says is that nothing is wrong, not how good the
+crystal is.
+
+## the hourly probe
+
+Same checks as the late probe, short gate. Captured with
+`LF_MONITOR_PERIOD_MS` shortened to 5 s.
+
+```
+[00:00:11.287,671] <inf> lf_probe: runtime probe: LF_OK at -1 ppm over 4096 LF ticks
+[00:00:11.287,680] <inf> lf_probe: runtime spread 64 gates of 32 LF : mean 15625 HF, mad 0 HF (28 ppm), range 5 HF (320 ppm)
+```
+
+Four consecutive runtime probes read 20 to 28 ppm of spread on the crystal. The
+spread runs on every judging probe, so a source that changes after boot is still
+checked.
 
 ## an LF counter that is not advancing
 
@@ -190,8 +206,8 @@ and `LFCLK` runs on the internal RC with autocalibration on.
 
 `LF_WRONG_SRC` on a clock whose mean error is 1 ppm. That is the whole point: a
 calibrated `LFRC` on this DK reads better than the crystal does in absolute
-terms, so it clears `LF_PPM_REJECT` at 2000 ppm and would clear a 50 ppm noise
-floor. The spread is what condemns it, and it feeds the verdict and the fault
+terms, so it clears `LF_PPM_REJECT` at 2000 ppm with three decades to spare and
+would clear anything the reference itself can resolve. The spread is what condemns it, and it feeds the verdict and the fault
 latch rather than only printing a warning.
 
 Both sides, one DK, room temperature, spread taken inside the probe:
@@ -234,6 +250,11 @@ Same absolute shortfall either way. A fixed time error scales as 1/gate-length
 in ppm, so 99 ticks of 16e6 is 6 ppm and 142 of 2e6 is 71 ppm. That is the whole
 argument for the DPPI gate.
 
+> The software rows come from the commit that added them and the captured rows
+> from the commit after, so this is two campaigns rather than one sitting. The
+> read-pair latency accounts for about 6 of the 13 ppm between the two long-gate
+> means; the rest is unexplained and inside the reference's own 30 ppm.
+
 # Software Description
 
 | file | what's in it |
@@ -251,7 +272,7 @@ argument for the DPPI gate.
 | `lf_verdict_get()` | capture first, software gate second, then a verdict |
 | `lf_spread_measure()` | cycle-to-cycle deviation over `LF_JITTER_SAMPLES` short gates |
 | `lf_probe_run()` | one scheduled probe plus the fault latch |
-| `lf_monitor_thread()` | early probe, late probe, spread baseline, hourly poll |
+| `lf_monitor_thread()` | early probe, late probe, then the hourly poll |
 
 Both gates ship. `lf_verdict_get()` tries the capture first because it's the
 accurate one, and only returns `LF_ABSENT` when the software gate fails too. A
@@ -388,6 +409,14 @@ with 20 to 30 ppm of spread afterwards across six boots.
 > on a healthy board. The ppm figure comes from the summed deviation before
 > dividing, which keeps sub-tick resolution.
 
+> On a crystal that figure is the instrument, not the clock. `mad_ppm` happens to
+> equal the summed deviation in ticks exactly, because 15625 x 64 = 1e6, so a
+> reading of 30 means 30 of 64 samples landed one tick off the mean. That counts
+> how often the capture straddles a tick boundary: LF-to-HF phase, PPIB latency,
+> quantization. The threshold works because an RC source deviates by 4 to 10
+> ticks per sample, well clear of that floor, but do not read 30 ppm as the
+> crystal's jitter.
+
 > `lf_hz` only ever prints 32767 to 32770, because 1 Hz at 32768 Hz is 30 ppm.
 > Read the ppm column.
 
@@ -452,9 +481,9 @@ both sides, but on one DK at room temperature. The crystal side threw one 58 ppm
 boot against a 19 to 29 ppm cluster, so re-check the margins over temperature and
 on a second board before trusting them.
 
-The software gate cannot measure spread, so a probe that falls back to it judges
-the mean alone and will pass a calibrated RC. That only happens when the DPPI
-route is broken, which is reported separately as `-EIO`.
+The software gate cannot measure spread, so a probe that has to fall back to it
+returns `-EIO` rather than a verdict. There is no path where a mean-only reading
+is reported as `LF_OK`. That `-EIO` branch has not been observed on hardware.
 
 Anything better than about 30 ppm is beyond this rig, since `fll16m` resolves at
 `hfxo`'s `accuracy-ppm`.

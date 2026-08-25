@@ -22,10 +22,14 @@
  */
 #define LF_NOMINAL_HZ DT_PROP(DT_NODELABEL(lfclk), clock_frequency)
 
-/* Gate lengths in LF ticks. Multiples of 32 are what make the expected HF
- * count integral: 16e6 / 32768 = 488.28125, and 488.28125 * 32 = 15625, so any
- * multiple of 32 LF ticks lands on a whole number of HF ticks and the
- * arithmetic stays in integers.
+/* Gate lengths in LF ticks. Multiples of 32 make the expected HF count integral:
+ * 16e6 / 32768 = 488.28125, and 488.28125 * 32 = 15625.
+ *
+ * That only holds for the captured gate, where the window is exactly gate_ticks
+ * wide. The software gate derives its expected count from the observed tick
+ * delta, which overshoots, so its division truncates by up to one HF tick. That
+ * is 0.06 ppm on the long gate, and it is why the captured gate is the one the
+ * verdict trusts. main.c asserts the multiples at build time.
  */
 #define LF_GATE_TICKS_LONG   32768 /* 1 s, expected 16000000 HF ticks exactly */
 #define LF_GATE_TICKS_SHORT  4096  /* 125 ms, expected 2000000 HF ticks exactly */
@@ -43,12 +47,6 @@
  * an outcome rather than an error.
  */
 #define LF_CAPTURE_TIMEOUT_MS 2000
-
-/* fll16m resolves at the hfxo node's accuracy-ppm, which is 30 on this DK, so
- * a tighter claim than this is the reference's own error being reported as the
- * LF clock's. Do not narrow it without a better reference.
- */
-#define LF_PPM_NOISE_FLOOR 50
 
 /* Above this, the LF source is not a crystal. Deliberately loose: lfclk
  * declares lflprc-accuracy-ppm at exactly 1000, so any threshold at or below
@@ -83,10 +81,14 @@
  */
 #define LF_PPM_SPREAD_REJECT 150
 
-/* The board's declared LFCLK startup budget, which is what
- * nrf_clock_control_get_startup_time() reports for an LFXO accuracy request on
- * this DK. A probe at this point separates dead from slow-starting, because the
- * two differ only in time.
+/* The board's declared LFXO startup budget, from lfosc.lfxo.startupTimeMs in
+ * zephyr/boards/nordic/nrf54h20dk/bicr.json. A probe at this point separates
+ * dead from slow-starting, because the two differ only in time.
+ *
+ * The handoff attributed this to nrf_clock_control_get_startup_time(), which
+ * would presumably report the same number, but this code never calls it: lfclk
+ * is disabled in this build and only fll16m is queried. Enable &lfclk and ask if
+ * you want that confirmed rather than inferred.
  */
 #define LF_PROBE_EARLY_MS 600
 

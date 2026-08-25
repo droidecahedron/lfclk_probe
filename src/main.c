@@ -48,6 +48,14 @@ BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(LF_COUNTER_NODE), "rtc130 disabled, board o
 BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(HF_COUNTER_NODE), "timer130 disabled, board overlay missing?");
 BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(FLL16M_NODE), "fll16m disabled, board overlay missing?");
 
+/* The integral expected HF count in lf_probe.h depends on this, and nothing else
+ * enforces it. 16e6 / 32768 = 488.28125, so only multiples of 32 LF ticks land on
+ * a whole number of HF ticks.
+ */
+BUILD_ASSERT(LF_GATE_TICKS_LONG % 32 == 0, "long gate must be a multiple of 32 LF ticks");
+BUILD_ASSERT(LF_GATE_TICKS_SHORT % 32 == 0, "short gate must be a multiple of 32 LF ticks");
+BUILD_ASSERT(LF_GATE_TICKS_JITTER % 32 == 0, "jitter gate must be a multiple of 32 LF ticks");
+
 /* What a conditioned reference is supposed to resolve to. FLL16M has exactly
  * two options on this part: open loop at open-loop-accuracy-ppm (20000 on this
  * SoC), and bypass, which routes HFXO straight through at the hfxo node's
