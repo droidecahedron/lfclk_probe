@@ -131,7 +131,7 @@ error: `fll16m` resolves at 30 ppm, so the reference contributes more uncertaint
 than the figure itself. What this says is that nothing is wrong, not how good the
 crystal is.
 
-## the hourly probe
+## the probe
 
 Same checks as the late probe, short gate. Captured with
 `LF_MONITOR_PERIOD_MS` shortened to 5 s.
@@ -317,16 +317,16 @@ removes that offset.
 | `lf_probe_run()` | one scheduled probe plus the fault latch |
 | `lf_monitor_thread()` | early probe, late probe, then the hourly poll |
 
-Both gates ship. `lf_verdict_get()` tries the capture first because it's the
+`lf_verdict_get()` tries the capture first because it's the
 accurate one, and only returns `LF_ABSENT` when the software gate fails too. A
 misconfigured DPPI route times out exactly like a dead clock, so if the capture
 fails while the software gate still reads a healthy clock you get `-EIO` and the
 software reading in the log.
 
-# Notes
 
-Most of what follows cost a bench session to find. None of it is obvious from the
-headers.
+>![NOTE]
+> Most of what follows cost a bench session to find. None of it is obvious from the
+headers. These are just jostled into this readme as extra content, not core to the app.
 
 ## the clock API tells you what was asked for
 
