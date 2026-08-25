@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2026 <Nordic Semi
+ * Copyright (c) 2026 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 /**
  * @file
- * @brief LFCLK health probe for nRF54H20 — scaffolding.
+ * @brief LFCLK health probe for nRF54H20.
  *
  * Detects whether LFCLK is actually running off the LFXO by counting it
  * against an HFXO-derived reference. Nothing in the clock stack reports a
