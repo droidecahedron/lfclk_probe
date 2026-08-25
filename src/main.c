@@ -482,22 +482,46 @@ static const char *lf_verdict_str(enum lf_verdict verdict)
  * @retval -EIO    DPPI route fault. The clock runs, the captured gate does not.
  * @retval negative Other measurement failure.
  */
-static int lf_verdict_get(uint32_t gate_ticks, enum lf_verdict *verdict,
-			  struct lf_measurement *meas)
+static int lf_verdict_get(uint32_t gate_ticks, bool check_spread,
+			  enum lf_verdict *verdict, struct lf_measurement *meas,
+			  struct lf_spread *spread)
 {
 	int cap_err;
 	int soft_err;
+	int err;
 
 	/* Fail safe default. Every error path below returns non-zero and a caller
 	 * must not read the verdict then, but if one does, the conservative answer
 	 * is the alarming one rather than a reassuring LF_OK.
 	 */
 	*verdict = LF_ABSENT;
+	spread->samples = 0;
 
 	cap_err = lf_capture_measure(gate_ticks, meas);
 	if (cap_err == 0) {
-		*verdict = (meas->ppm > LF_PPM_REJECT || meas->ppm < -LF_PPM_REJECT)
-			 ? LF_WRONG_SRC : LF_OK;
+		if (meas->ppm > LF_PPM_REJECT || meas->ppm < -LF_PPM_REJECT) {
+			*verdict = LF_WRONG_SRC;
+			return 0;
+		}
+
+		/* The mean passing means nothing on its own. A calibrated LFRC on
+		 * this DK measures between -61 and +93 ppm, so it clears a 2000 ppm
+		 * threshold every time. The spread is what separates it from a
+		 * crystal, so it gets the final say on the verdict rather than only
+		 * a log line.
+		 */
+		if (!check_spread || LF_PPM_SPREAD_REJECT == 0) {
+			*verdict = LF_OK;
+			return 0;
+		}
+
+		err = lf_spread_measure(spread);
+		if (err) {
+			return err;
+		}
+
+		*verdict = (spread->mad_ppm > LF_PPM_SPREAD_REJECT) ? LF_WRONG_SRC
+								    : LF_OK;
 		return 0;
 	}
 
@@ -572,9 +596,10 @@ static int lf_ref_release(void)
  * and given back after, same as the reference always was: DPPI channels and a
  * running HFXO are not worth holding for an hour to use them for 125 ms.
  */
-static void lf_probe_run(const char *phase, uint32_t gate_ticks)
+static void lf_probe_run(const char *phase, uint32_t gate_ticks, bool check_spread)
 {
 	struct lf_measurement meas;
+	struct lf_spread spread = {0};
 	enum lf_verdict verdict;
 	int err;
 
@@ -585,7 +610,7 @@ static void lf_probe_run(const char *phase, uint32_t gate_ticks)
 	}
 
 	lf_capture_setup();
-	err = lf_verdict_get(gate_ticks, &verdict, &meas);
+	err = lf_verdict_get(gate_ticks, check_spread, &verdict, &meas, &spread);
 	lf_capture_teardown();
 
 	(void)lf_ref_release();
@@ -602,45 +627,21 @@ static void lf_probe_run(const char *phase, uint32_t gate_ticks)
 			phase, lf_verdict_str(verdict), meas.ppm, gate_ticks);
 	}
 
-	lf_fault_update(verdict);
-}
-
-static void lf_spread_report(void)
-{
-	/* Zeroed because the compiler cannot see that lf_spread_measure() fills
-	 * every field before returning 0, and a partly-filled spread reading is
-	 * worth reporting as zeros rather than as stack.
+	/* samples stays zero when the spread was skipped or the software gate had
+	 * to be used, which cannot measure it.
 	 */
-	struct lf_spread spread = {0};
-	int err;
+	if (spread.samples) {
+		LOG_INF("%s spread %u gates of %u LF : mean %u HF, mad %u HF (%u ppm), range %u HF (%u ppm)",
+			phase, spread.samples, LF_GATE_TICKS_JITTER, spread.hf_mean,
+			spread.hf_mad, spread.mad_ppm, spread.hf_range, spread.range_ppm);
 
-	err = lf_ref_acquire();
-	if (err) {
-		LOG_ERR("spread run: reference unavailable (err %d)", err);
-		return;
+		if (spread.mad_ppm > LF_PPM_SPREAD_REJECT) {
+			LOG_WRN("%s spread %u ppm exceeds %d ppm: RC source, not a crystal",
+				phase, spread.mad_ppm, LF_PPM_SPREAD_REJECT);
+		}
 	}
 
-	lf_capture_setup();
-	err = lf_spread_measure(&spread);
-	lf_capture_teardown();
-
-	(void)lf_ref_release();
-
-	if (err) {
-		LOG_ERR("spread run failed (err %d)", err);
-		return;
-	}
-
-	LOG_INF("spread %u gates of %u LF : mean %u HF, mad %u HF (%u ppm), range %u HF (%u ppm)",
-		spread.samples, LF_GATE_TICKS_JITTER, spread.hf_mean,
-		spread.hf_mad, spread.mad_ppm, spread.hf_range, spread.range_ppm);
-
-	if (LF_PPM_SPREAD_REJECT == 0) {
-		LOG_WRN("spread threshold unset, reading is recorded not judged");
-	} else if (spread.mad_ppm > LF_PPM_SPREAD_REJECT) {
-		LOG_WRN("spread %u ppm exceeds %d ppm: calibrated RC rather than a crystal",
-			spread.mad_ppm, LF_PPM_SPREAD_REJECT);
-	}
+	lf_fault_update(verdict);
 }
 
 /* Two boot probes because dead and slow-starting differ only in time. A verdict
@@ -666,18 +667,16 @@ static void lf_monitor_thread(void *p1, void *p2, void *p3)
 	 * a 1 s gate plus 4400 ms lands at 6 s instead of the 5 s the window was
 	 * sized for.
 	 */
+	/* The early probe skips the spread. At 20 ms into boot the range read 220
+	 * HF ticks against 2 once settled, so judging it this early condemns good
+	 * hardware. This probe is here to separate dead from slow-starting, which
+	 * the mean already does.
+	 */
 	k_sleep(K_TIMEOUT_ABS_MS(LF_PROBE_EARLY_MS));
-	lf_probe_run("early", LF_GATE_TICKS_LONG);
+	lf_probe_run("early", LF_GATE_TICKS_LONG, false);
 
 	k_sleep(K_TIMEOUT_ABS_MS(LF_PROBE_LATE_MS));
-	lf_probe_run("late", LF_GATE_TICKS_LONG);
-
-	/* Spread baseline goes here rather than in main(). Measured at 20 ms into
-	 * boot it read a 220 tick range against 2 ticks once settled, because the
-	 * oscillator is still coming up: exactly the intermittent condemnation of
-	 * good hardware that LF_PROBE_LATE_MS exists to avoid.
-	 */
-	lf_spread_report();
+	lf_probe_run("late", LF_GATE_TICKS_LONG, true);
 
 	/* Short gate from here on. It is only as good as the long one because
 	 * the capture removed the fixed offset that used to make it 70 ppm
@@ -685,7 +684,7 @@ static void lf_monitor_thread(void *p1, void *p2, void *p3)
 	 */
 	for (;;) {
 		k_sleep(K_MSEC(LF_MONITOR_PERIOD_MS));
-		lf_probe_run("runtime", LF_GATE_TICKS_SHORT);
+		lf_probe_run("runtime", LF_GATE_TICKS_SHORT, true);
 	}
 }
 

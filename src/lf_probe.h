@@ -58,28 +58,30 @@
  */
 #define LF_PPM_REJECT 2000
 
-/* Two-sided, measured on one DK at room temperature, five boots each side.
+/* Two-sided, measured on one DK at room temperature with the spread taken
+ * inside the probe, straight after the 1 s gate, so the reference is already
+ * settled.
  *
- *   crystal   mad 76 to 110 ppm    range  9 to 19 HF ticks
- *   LFRC      mad 278 to 665 ppm   range 29 to 46 HF ticks
+ *   crystal   mad 19 to  58 ppm    8 boots
+ *   LFRC      mad 248 to 622 ppm   5 boots
  *
- * 200 sits 1.8x above the worst crystal reading and 1.4x below the quietest
- * RC one. The bias toward not raising false alarms is deliberate: this latches
- * a fault, and chasing a phantom costs more than the mean check missing a
- * marginal RC.
+ * 150 sits 2.6x above the worst crystal reading and 1.65x below the quietest RC
+ * one. The bias toward not raising false alarms is deliberate, because a bad
+ * reading here latches the fault flag.
  *
- * MAD separates the two cleanly at 2.5x. Range only manages 1.5x, which is why
- * the verdict uses mad_ppm.
+ * Measure it inside the probe, not on its own. An earlier version ran the spread
+ * from a fresh lf_ref_acquire() and read 76 to 110 ppm on the same crystal,
+ * because it was measuring the HFXO ramp as well as the LF source.
  *
- * The RC side came from a BICR edit declaring source LFRC, which is the only
- * way to get a non-crystal LFCLK on this part. A runtime request is subsumed by
- * SCFW arbitration. See the README.
+ * The RC side came from a BICR edit declaring source LFRC, which is the only way
+ * to get a non-crystal LFCLK on this part. A runtime request is subsumed by SCFW
+ * arbitration. See the README.
  *
- * TODO: re-check over temperature and on more than one board. Both figures are
- * five boots on a single DK, and the crystal side spans 1.4x boot to boot while
- * the RC side spans 2.4x.
+ * TODO: re-check over temperature and on more than one board. Both figures come
+ * from a single DK, and the crystal side threw one 58 ppm boot against a 19 to
+ * 29 ppm cluster.
  */
-#define LF_PPM_SPREAD_REJECT 200
+#define LF_PPM_SPREAD_REJECT 150
 
 /* The board's declared LFCLK startup budget, which is what
  * nrf_clock_control_get_startup_time() reports for an LFXO accuracy request on

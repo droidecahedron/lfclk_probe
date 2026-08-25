@@ -54,17 +54,21 @@ Three verdicts come out:
 | verdict | means | threshold |
 | --- | --- | --- |
 | `LF_OK` | crystal present and running | within `LF_PPM_REJECT` |
-| `LF_WRONG_SRC` | running on an RC source | outside `LF_PPM_REJECT`, 2000 ppm |
+| `LF_WRONG_SRC` | running on an RC source | mean outside `LF_PPM_REJECT` (2000 ppm), or spread outside `LF_PPM_SPREAD_REJECT` (150 ppm) |
 | `LF_ABSENT` | `LFCLK` not advancing | no gate closed |
 
 Schedule, all measured from boot:
 
 | when | gate | why there |
 | --- | --- | --- |
-| 600 ms | 1 s | the board's declared startup budget |
-| 5 s | 1 s | clears the `LFXO` calibration window |
-| after the 5 s probe | 64 x 32 LF ticks | spread baseline |
-| hourly | 125 ms | nothing re-evaluates a satisfied clock request |
+| 600 ms | 1 s, mean only | the board's declared startup budget |
+| 5 s | 1 s plus 64 x 32 LF ticks | clears the `LFXO` calibration window |
+| hourly | 125 ms plus 64 x 32 LF ticks | nothing re-evaluates a satisfied clock request |
+
+The early probe judges the mean only. At 20 ms into boot the spread read a 220 HF
+tick range against 2 once settled, so judging it that early condemns good
+hardware. That probe is there to separate dead from slow-starting, which the mean
+already does.
 
 ## SoC resources
 
@@ -151,32 +155,37 @@ something went wrong.
 
 ## a board running on LFRC
 
-The case the mean cannot see. `BICR` edited to declare `source: LFRC`, so
-arbitration has no crystal to pick and `LFCLK` runs on the internal RC with
-autocalibration on.
+`BICR` edited to declare `source: LFRC`, so arbitration has no crystal to pick
+and `LFCLK` runs on the internal RC with autocalibration on.
 
 ```
-[00:00:01.621,688] <inf> lf_probe: early probe: LF_OK at 93 ppm over 32768 LF ticks
-[00:00:06.021,585] <inf> lf_probe: late probe: LF_OK at 5 ppm over 32768 LF ticks
-[00:00:06.092,965] <inf> lf_probe: spread 64 gates of 32 LF : mean 15628 HF, mad 5 HF (351 ppm), range 41 HF (2624 ppm)
-[00:00:06.092,969] <wrn> lf_probe: spread 351 ppm exceeds 200 ppm: calibrated RC rather than a crystal
+[00:00:01.620,834] <inf> lf_probe: early probe: LF_OK at 11 ppm over 32768 LF ticks
+[00:00:06.091,169] <inf> lf_probe: late probe: LF_WRONG_SRC at 1 ppm over 32768 LF ticks
+[00:00:06.091,179] <inf> lf_probe: late spread 64 gates of 32 LF : mean 15633 HF, mad 3 HF (248 ppm), range 28 HF (1792 ppm)
+[00:00:06.091,184] <wrn> lf_probe: late spread 248 ppm exceeds 150 ppm: RC source, not a crystal
+[00:00:06.091,191] <err> lf_probe: fault flag latched: LF_WRONG_SRC
 ```
 
-`LF_OK at 5 ppm`. A calibrated `LFRC` on this DK reads better than the crystal
-does in absolute terms, sails through `LF_PPM_REJECT` at 2000 ppm, and would pass
-a 50 ppm noise floor. Nine boots on RC, and the verdict was `LF_OK` every time.
+`LF_WRONG_SRC` on a clock whose mean error is 1 ppm. That is the whole point: a
+calibrated `LFRC` on this DK reads better than the crystal does in absolute
+terms, so it clears `LF_PPM_REJECT` at 2000 ppm and would clear a 50 ppm noise
+floor. The spread is what condemns it, and it feeds the verdict and the fault
+latch rather than only printing a warning.
 
-Only the spread separates them. Nine boots each side, one DK, room temperature:
+Both sides, one DK, room temperature, spread taken inside the probe:
 
-| condition | mean at late probe | spread MAD |
-| --- | --- | --- |
-| crystal | -5 to -6 ppm | 76 to 110 ppm |
-| LFRC | -61 to +93 ppm | 278 to 681 ppm |
+| condition | mean at late probe | spread MAD | verdict |
+| --- | --- | --- | --- |
+| crystal, 14 boots | -6 to -7 ppm | 19 to 58 ppm | `LF_OK`, nothing latched |
+| LFRC, 9 boots | -33 to +56 ppm | 248 to 622 ppm | `LF_WRONG_SRC`, latched |
 
-The mean overlaps and tells you nothing. MAD separates by 2.5x, which is why
-`LF_PPM_SPREAD_REJECT` is 200: 1.8x above the worst crystal reading, 1.4x below
-the quietest RC one. Range only manages 1.5x separation, so the verdict uses
-`mad_ppm`.
+The mean overlaps completely. MAD separates by 4.3x, which is where the 150 ppm
+threshold comes from: 2.6x above the worst crystal reading, 1.65x below the
+quietest RC one.
+
+> Measure the spread inside the probe, right after the gate. An earlier version
+> ran it from a fresh `lf_ref_acquire()` and read 76 to 110 ppm on the same
+> crystal, because it was measuring the HFXO ramp along with the LF source.
 
 ## proof the measurement is real
 
@@ -410,11 +419,14 @@ A completely stopped `LFCLK` is invisible from inside. The monitor thread needs
 SYSCOUNTER falls back to `LFCLK` while asleep. Stop it outright and the CPU never
 wakes. You recognise that one, you don't detect it.
 
-A calibrated `LFRC` near nominal gets past `LF_PPM_REJECT` every time, so the
-spread check is not optional on this part. `LF_PPM_SPREAD_REJECT` is measured
-from both sides now, but from one DK at room temperature. The crystal side spans
-1.4x boot to boot and the RC side spans 2.4x, so re-check it over temperature and
-on more than one board before trusting the margins.
+The spread check is what catches a calibrated `LFRC`, and it is measured from
+both sides, but on one DK at room temperature. The crystal side threw one 58 ppm
+boot against a 19 to 29 ppm cluster, so re-check the margins over temperature and
+on a second board before trusting them.
+
+The software gate cannot measure spread, so a probe that falls back to it judges
+the mean alone and will pass a calibrated RC. That only happens when the DPPI
+route is broken, which is reported separately as `-EIO`.
 
 Anything better than about 30 ppm is beyond this rig, since `fll16m` resolves at
 `hfxo`'s `accuracy-ppm`.
