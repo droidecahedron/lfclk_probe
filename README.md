@@ -145,6 +145,51 @@ Four consecutive runtime probes read 20 to 28 ppm of spread on the crystal. The
 spread runs on every judging probe, so a source that changes after boot is still
 checked.
 
+## a crystal dragged off frequency while running
+
+The one that matters. Scope probe held against the `XL1` pad of `X2`, the
+32.768 kHz crystal, on a board that had been up 28 minutes. Two separate
+contacts:
+
+```
+00:28:31  runtime probe: LF_OK at -2 ppm over 4096 LF ticks
+00:28:35  runtime probe: LF_WRONG_SRC at -335630 ppm over 4096 LF ticks
+00:28:35  fault flag latched: LF_WRONG_SRC
+00:28:40  fault flag still latched, 1 of 2 good readings
+00:28:46  fault flag cleared after 2 good readings
+00:28:51  runtime probe: LF_OK at -16 ppm over 4096 LF ticks
+00:28:56  runtime probe: LF_WRONG_SRC at -629021 ppm over 4096 LF ticks
+00:28:56  fault flag latched: LF_WRONG_SRC
+00:29:01  runtime probe: LF_WRONG_SRC at -60842 ppm over 4096 LF ticks
+00:29:06  runtime probe: LF_OK at 0 ppm over 4096 LF ticks
+00:29:06  fault flag still latched, 1 of 2 good readings
+00:29:11  fault flag cleared after 2 good readings
+```
+
+Those ppm figures are frequencies. The gate counts HF ticks across a fixed number
+of LF ticks, so a longer window means a slower clock:
+
+| reading | implied LFCLK | share of nominal |
+| --- | --- | --- |
+| -335630 ppm | 24534 Hz | 75% |
+| -629021 ppm | 20115 Hz | 61% |
+| -60842 ppm | 30889 Hz | 94% |
+
+The crystal did not stop and it did not hand over to `LFRC`. It stayed in the
+loop and got pulled up to 12 kHz off resonance by probe capacitance, and the
+drag scaled with how hard the pad was contacted. Detected within one probe
+interval, 5 s here.
+
+> `LF_PPM_REJECT` caught this, not the spread. At -629021 ppm it is 300x past the
+> 2000 ppm threshold. The spread check exists for the calibrated RC case where
+> the mean is useless; this is the coarse detector earning its place.
+
+> No spread line appears on those two probes. `lf_verdict_get()` returns
+> `LF_WRONG_SRC` from the mean and skips the spread measurement, so the missing
+> line is correct behaviour rather than a dropped log.
+
+`XL1` on `X2` is a small pad and wants deliberate contact, not a light touch.
+
 ## an LF counter that is not advancing
 
 `counter_stop(rtc130)`, so the counter genuinely does not tick. To a gate that is
@@ -471,10 +516,17 @@ the worst of five, because the log backend is still draining.
 
 ## what this can't detect
 
-A completely stopped `LFCLK` is invisible from inside. The monitor thread needs
-`LFCLK` to schedule itself, since `k_sleep()` parks on the system timer and GRTC
-SYSCOUNTER falls back to `LFCLK` while asleep. Stop it outright and the CPU never
-wakes. You recognise that one, you don't detect it.
+A crystal that degrades while running does **not** trigger a fallback to `LFRC`
+on this part. Measured: pulled to 61% of nominal and the system stayed on it, no
+handover, no complaint from anything but this probe. That was an open question in
+the handoff and it is now settled in the direction that makes the probe
+necessary.
+
+What is still open is a crystal that stops completely. Probe loading was not
+enough to kill oscillation, only to drag it, so that branch is untested. If it
+does stop, the monitor thread cannot report it: `k_sleep()` parks on the system
+timer and GRTC SYSCOUNTER falls back to `LFCLK` while asleep, so the CPU never
+wakes. Silence on the console is the signature.
 
 The spread check is what catches a calibrated `LFRC`, and it is measured from
 both sides, but on one DK at room temperature. The crystal side threw one 58 ppm
