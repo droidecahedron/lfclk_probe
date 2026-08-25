@@ -81,7 +81,7 @@ already does.
 | `fll16m` | held for the gate only, released after |
 | threads | one, 1024 B stack, `K_PRIO_PREEMPT(10)` |
 | pins | none |
-| flash / RAM | 58308 B / 15656 B |
+| flash / RAM | 58260 B / 15656 B |
 
 Leaves you `rtc131`, `timer131` through `timer137`, and DPPI channels 0, 1, and
 4 through 7.
@@ -97,6 +97,16 @@ Console is `uart136` on VCOM0, 115200 baud. On the DK that's `/dev/ttyACM0`.
 
 # Example Output
 
+Every verdict below came off the shipping build under a real hardware condition.
+What produced each one:
+
+| verdict | condition | how it was produced |
+| --- | --- | --- |
+| `LF_OK` | crystal running | stock `BICR`, 14 boots |
+| `LF_WRONG_SRC` | RC source | `BICR` `lfosc.source: LFRC`, 9 boots |
+| `LF_ABSENT` | LF counter not advancing | `counter_stop(rtc130)` |
+| `-EIO` | DPPI route broken, clock fine | `nrf_rtc_event_enable()` omitted |
+
 ## a healthy board
 
 Stock `BICR`, crystal fitted and working.
@@ -104,39 +114,51 @@ Stock `BICR`, crystal fitted and working.
 ```
 *** Booting nRF Connect SDK v3.4.0-99553055607b ***
 *** Using Zephyr OS v4.4.0-bf801e4e3d19 ***
-[00:00:00.020,128] <inf> lf_probe: lf_probe on nrf54h20dk@0.9.0/nrf54h20/cpuapp
-[00:00:00.020,133] <inf> lf_probe: lfclk nominal      : 32768 Hz
-[00:00:00.020,136] <inf> lf_probe: lfrc   declared    : 500 ppm, 200 us startup
-[00:00:00.020,139] <inf> lf_probe: lflprc declared    : 1000 ppm, 200 us startup
-[00:00:00.020,146] <inf> lf_probe: lf counter rtc@928000 : 32768 Hz
-[00:00:00.020,153] <inf> lf_probe: hf counter timer@9a2000 : 16000000 Hz
-[00:00:00.020,163] <inf> lf_probe: fll16m resolved    : 16000000 Hz, 30 ppm, precision 0, 850 us startup
-[00:00:01.620,864] <inf> lf_probe: early probe: LF_OK at -5 ppm over 32768 LF ticks
-[00:00:06.020,730] <inf> lf_probe: late probe: LF_OK at -6 ppm over 32768 LF ticks
-[00:00:06.092,049] <inf> lf_probe: spread 64 gates of 32 LF : mean 15624 HF, mad 1 HF (93 ppm), range 19 HF (1216 ppm)
+[00:00:00.020,340] <inf> lf_probe: lf_probe on nrf54h20dk@0.9.0/nrf54h20/cpuapp
+[00:00:00.020,345] <inf> lf_probe: lfclk nominal      : 32768 Hz
+[00:00:00.020,348] <inf> lf_probe: lfrc   declared    : 500 ppm, 200 us startup
+[00:00:00.020,350] <inf> lf_probe: lflprc declared    : 1000 ppm, 200 us startup
+[00:00:00.020,358] <inf> lf_probe: lf counter rtc@928000 : 32768 Hz
+[00:00:00.020,364] <inf> lf_probe: hf counter timer@9a2000 : 16000000 Hz
+[00:00:00.020,374] <inf> lf_probe: fll16m resolved    : 16000000 Hz, 30 ppm, precision 0, 850 us startup
+[00:00:01.621,079] <inf> lf_probe: early probe: LF_OK at -8 ppm over 32768 LF ticks
+[00:00:06.091,353] <inf> lf_probe: late probe: LF_OK at -7 ppm over 32768 LF ticks
+[00:00:06.091,362] <inf> lf_probe: late spread 64 gates of 32 LF : mean 15625 HF, mad 0 HF (30 ppm), range 3 HF (192 ppm)
 ```
 
-This board's `LFXO` runs about 6 ppm slow, inside its 20 ppm `BICR` claim.
+This board's `LFXO` runs 6 to 8 ppm slow, inside its 20 ppm `BICR` claim. Across
+14 boots the spread stayed between 19 and 58 ppm against a 150 ppm threshold.
 
-## LF_ABSENT, no clock
+## an LF counter that is not advancing
 
-Forced by making `LF_CAPTURE_TIMEOUT_MS` negative so no gate can close. Same
-output you get from an `LFCLK` that never starts.
+`counter_stop(rtc130)`, so the counter genuinely does not tick. To a gate that is
+indistinguishable from a dead `LFCLK`: the value never changes.
 
 ```
-[00:00:00.620,805] <wrn> lf_probe: early probe: LF_ABSENT, no gate closed
-[00:00:00.620,815] <err> lf_probe: fault flag latched: LF_ABSENT
-[00:00:05.020,748] <wrn> lf_probe: late probe: LF_ABSENT, no gate closed
-[00:00:05.021,719] <err> lf_probe: spread run failed (err -116)
+[00:00:00.020,446] <wrn> lf_probe: SCRATCH: rtc130 stopped, LF counter will not advance
+[00:00:06.622,022] <wrn> lf_probe: early probe: LF_ABSENT, no gate closed
+[00:00:06.622,033] <err> lf_probe: fault flag latched: LF_ABSENT
+[00:00:12.624,996] <wrn> lf_probe: late probe: LF_ABSENT, no gate closed
 ```
 
-`-116` is `-ETIMEDOUT`. The spread run fails the same way rather than reporting a
-number it cannot have measured.
+Read the timestamps. The early probe reports at 6.62 s rather than 1.62 s because
+it tried the captured gate, timed out at 3 s, fell back to the software gate, and
+timed out again. `LF_ABSENT` costs about 6 s per probe and needs both gates to
+fail, which is the discriminator doing its job.
 
-## LF_WRONG_SRC and the fault latch
+The late probe ran back to back at 12.62 s instead of being skipped, because its
+absolute 5 s deadline had already passed when the early probe finished.
 
-Forced with `LF_PPM_REJECT = 3`, which sits between the long gate's -6 ppm and
-the short gate's 0 ppm, so the boot probes fail and the runtime probes pass.
+> A genuinely stopped `LFCLK` cannot be produced from inside. It stops the CPU and
+> no application code runs, so that one is recognition only. `LF_ABSENT` exists to
+> report a non-advancing LF counter as a verdict rather than hanging or printing a
+> number it never measured.
+
+## the fault latch clearing
+
+The RC board never recovers, so clearing needs a fault that goes away.
+`LF_PPM_REJECT` set to 3, between the long gate's -6 ppm and the short gate's
+0 ppm, so the boot probes fail and the runtime probes pass.
 `LF_MONITOR_PERIOD_MS` shortened to 4 s to make it watchable.
 
 ```
@@ -149,8 +171,8 @@ the short gate's 0 ppm, so the boot probes fail and the runtime probes pass.
 [00:00:14.344,439] <inf> lf_probe: fault flag cleared after 2 good readings
 ```
 
-The second bad reading doesn't re-log. The flag needs two consecutive good
-readings to clear, so a caller sampling less often than the probe still sees that
+The second bad reading does not re-log. Two consecutive good readings are needed
+to clear, so a caller sampling less often than the probe still sees that
 something went wrong.
 
 ## a board running on LFRC
@@ -357,11 +379,11 @@ not matter.
 > it first. `../bicr_backup/IFYOUBRICKEDUSETHISBICR.txt` has the recovery path.
 
 Restore was verified byte-identical to the backup, and the crystal read -6 ppm
-with 84 to 90 ppm of spread afterwards across four boots.
+with 20 to 30 ppm of spread afterwards across six boots.
 
 ## reading the log
 
-> `mad 1 HF (93 ppm)` looks self-contradictory and isn't. One HF tick in a 32
+> `mad 0 HF (30 ppm)` looks self-contradictory and isn't. One HF tick in a 32
 > tick gate is already 64 ppm, so per-sample deviation truncates to 0 or 1 ticks
 > on a healthy board. The ppm figure comes from the summed deviation before
 > dividing, which keeps sub-tick resolution.
@@ -375,15 +397,21 @@ The two boot deadlines are absolute (`K_TIMEOUT_ABS_MS`). A relative sleep runs
 from the end of the previous probe, which put the late probe at 6 s instead of 5
 and missed the window it was sized for.
 
-The spread run has to happen after the late probe. Measured 20 ms into boot it
-read a 220 HF tick range against 2 once settled, because the oscillator is still
-coming up. The mean settles fast and the spread doesn't:
+The spread cannot be judged early. The mean settles fast and the spread does
+not, which is why the 600 ms probe checks the mean alone.
+
+Measured with a standalone spread run that acquired the reference itself, so
+these figures carry an HFXO ramp the in-probe version does not:
 
 | measured at | mad | range |
 | --- | --- | --- |
 | 20 ms | 3 to 7 HF ticks | 41 and 220 HF ticks |
 | 5 s | 1 HF tick, 76 to 110 ppm | 9 to 19 HF ticks |
 | 12 s | 0 HF ticks, 17 to 20 ppm | 2 to 3 HF ticks |
+
+Taken inside the probe on this build, straight after the 1 s gate, the same
+crystal reads 19 to 58 ppm and 2 to 5 ticks at the 5 s probe. The 220 tick range
+at 20 ms is what the early probe would be judging.
 
 ```
 UNVERIFIED: why the spread keeps tightening after the 5 s calibration window.
