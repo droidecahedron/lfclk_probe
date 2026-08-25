@@ -149,6 +149,35 @@ The second bad reading doesn't re-log. The flag needs two consecutive good
 readings to clear, so a caller sampling less often than the probe still sees that
 something went wrong.
 
+## a board running on LFRC
+
+The case the mean cannot see. `BICR` edited to declare `source: LFRC`, so
+arbitration has no crystal to pick and `LFCLK` runs on the internal RC with
+autocalibration on.
+
+```
+[00:00:01.621,688] <inf> lf_probe: early probe: LF_OK at 93 ppm over 32768 LF ticks
+[00:00:06.021,585] <inf> lf_probe: late probe: LF_OK at 5 ppm over 32768 LF ticks
+[00:00:06.092,965] <inf> lf_probe: spread 64 gates of 32 LF : mean 15628 HF, mad 5 HF (351 ppm), range 41 HF (2624 ppm)
+[00:00:06.092,969] <wrn> lf_probe: spread 351 ppm exceeds 200 ppm: calibrated RC rather than a crystal
+```
+
+`LF_OK at 5 ppm`. A calibrated `LFRC` on this DK reads better than the crystal
+does in absolute terms, sails through `LF_PPM_REJECT` at 2000 ppm, and would pass
+a 50 ppm noise floor. Nine boots on RC, and the verdict was `LF_OK` every time.
+
+Only the spread separates them. Nine boots each side, one DK, room temperature:
+
+| condition | mean at late probe | spread MAD |
+| --- | --- | --- |
+| crystal | -5 to -6 ppm | 76 to 110 ppm |
+| LFRC | -61 to +93 ppm | 278 to 681 ppm |
+
+The mean overlaps and tells you nothing. MAD separates by 2.5x, which is why
+`LF_PPM_SPREAD_REJECT` is 200: 1.8x above the worst crystal reading, 1.4x below
+the quietest RC one. Range only manages 1.5x separation, so the verdict uses
+`mad_ppm`.
+
 ## proof the measurement is real
 
 The number that matters is not any single reading, it's that two gate lengths
@@ -279,6 +308,48 @@ No `nordic,nrf-timer` node carries `clock-frequency`. The rate comes from the
 clock parent as `NRF_PERIPH_GET_FREQUENCY(node) / BIT(prescaler)`, which is what
 `counter_nrfx_timer.c:447` does and what `counter_get_frequency()` returns.
 
+## injecting a non-crystal LFCLK
+
+Needed to calibrate the spread threshold, and a `BICR` edit is the only way. A
+runtime request gets subsumed by arbitration, as above.
+
+Declare `lfosc.source: LFRC` with autocalibration on. That is how a board built
+without a 32 kHz crystal is configured, so it is a supported path and it gives
+you the hard case: a calibrated RC sitting near nominal. `EXT_SQUARE` rests on an
+assumption about the crystal amplifier that the nRF54H20 PS was not available to
+confirm.
+
+> Do not generate the image straight from `bicr.json`. `LFOSC.LFXOCAL` at offset
+> `0x1C` holds `0x00000000` on this DK and no generated image reproduces it,
+> because it is calibration state rather than board config. Generating would
+> rewrite it as a side effect of a change to `lfosc.source`. Patch the bytes you
+> read off the device instead, and recompute the CRC with
+> `bicrgen.crc32_bzip2_input_reversed()`.
+
+Changing `source` from `LFXO` to `LFRC` moves exactly two registers plus the CRC:
+
+| offset | register | LFXO | LFRC |
+| --- | --- | --- | --- |
+| `0x18` | `LFOSC.LFXOCONFIG` | `870F58F2` | `EFFFFFFF` |
+| `0x20` | `LFOSC.LFRCAUTOCALCONFIG` | `FFFFFFFF` | `90C2E27F` |
+| `0x4C` | CRC | unprogrammed on this DK | recomputed |
+
+Validate before programming by feeding the patched hex back through
+`bicrgen.py -i patched.hex -o decoded.json`. It verifies the CRC and shows you
+that `power`, `ioPortPower`, `ioPortImpedance`, and `hfxo` came through
+unchanged. If the CRC were wrong it refuses.
+
+Program with `chip_erase_mode=ERASE_NONE`, pin reset, then read back `0x50`
+bytes and diff against what you wrote. MRAM runs in Direct Write mode by default
+under IronSide SE, so rewriting in place needs no erase and bit direction does
+not matter.
+
+> `BICR` is not erased by `ERASEALL`. A saved hex is the only way back, so take
+> it first. `../bicr_backup/IFYOUBRICKEDUSETHISBICR.txt` has the recovery path.
+
+Restore was verified byte-identical to the backup, and the crystal read -6 ppm
+with 84 to 90 ppm of spread afterwards across four boots.
+
 ## reading the log
 
 > `mad 1 HF (93 ppm)` looks self-contradictory and isn't. One HF tick in a 32
@@ -339,12 +410,11 @@ A completely stopped `LFCLK` is invisible from inside. The monitor thread needs
 SYSCOUNTER falls back to `LFCLK` while asleep. Stop it outright and the CPU never
 wakes. You recognise that one, you don't detect it.
 
-A calibrated `LFRC` near nominal gets past `LF_PPM_REJECT`. That's what the
-spread check is for, and `LF_PPM_SPREAD_REJECT` at 500 ppm is calibrated on one
-side only: five times the worst deviation from a good board, so it won't raise a
-false alarm, but nothing has been measured on a board whose LF source genuinely
-isn't a crystal. Producing one needs a `BICR` edit or a scope on XL1. Neither has
-been done. Backup and procedure are in `../bicr_backup/`.
+A calibrated `LFRC` near nominal gets past `LF_PPM_REJECT` every time, so the
+spread check is not optional on this part. `LF_PPM_SPREAD_REJECT` is measured
+from both sides now, but from one DK at room temperature. The crystal side spans
+1.4x boot to boot and the RC side spans 2.4x, so re-check it over temperature and
+on more than one board before trusting the margins.
 
 Anything better than about 30 ppm is beyond this rig, since `fll16m` resolves at
 `hfxo`'s `accuracy-ppm`.

@@ -58,19 +58,28 @@
  */
 #define LF_PPM_REJECT 2000
 
-/* Five times the worst mean absolute deviation seen on a good board at
- * LF_PROBE_LATE_MS, where readings ran 76 to 110 ppm. It will not condemn a
- * working crystal.
+/* Two-sided, measured on one DK at room temperature, five boots each side.
  *
- * The false negative rate is unknown. Nothing has been measured on a board whose
- * LF source is genuinely not a crystal, so a calibrated LFRC quiet enough to sit
- * under 500 ppm would pass. Closing that needs BICR injection or a scope on XL1,
- * both covered in the README.
+ *   crystal   mad 76 to 110 ppm    range  9 to 19 HF ticks
+ *   LFRC      mad 278 to 665 ppm   range 29 to 46 HF ticks
  *
- * TODO: tighten once the settling curve is known. A good board reads 17 to
- * 20 ppm settled, against 76 to 110 ppm at 5 s.
+ * 200 sits 1.8x above the worst crystal reading and 1.4x below the quietest
+ * RC one. The bias toward not raising false alarms is deliberate: this latches
+ * a fault, and chasing a phantom costs more than the mean check missing a
+ * marginal RC.
+ *
+ * MAD separates the two cleanly at 2.5x. Range only manages 1.5x, which is why
+ * the verdict uses mad_ppm.
+ *
+ * The RC side came from a BICR edit declaring source LFRC, which is the only
+ * way to get a non-crystal LFCLK on this part. A runtime request is subsumed by
+ * SCFW arbitration. See the README.
+ *
+ * TODO: re-check over temperature and on more than one board. Both figures are
+ * five boots on a single DK, and the crystal side spans 1.4x boot to boot while
+ * the RC side spans 2.4x.
  */
-#define LF_PPM_SPREAD_REJECT 500
+#define LF_PPM_SPREAD_REJECT 200
 
 /* The board's declared LFCLK startup budget, which is what
  * nrf_clock_control_get_startup_time() reports for an LFXO accuracy request on
