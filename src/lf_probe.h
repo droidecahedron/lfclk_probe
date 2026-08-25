@@ -27,8 +27,16 @@
  * multiple of 32 LF ticks lands on a whole number of HF ticks and the
  * arithmetic stays in integers.
  */
-#define LF_GATE_TICKS_LONG  32768 /* 1 s, expected 16000000 HF ticks exactly */
-#define LF_GATE_TICKS_SHORT 4096  /* 125 ms, expected 2000000 HF ticks exactly */
+#define LF_GATE_TICKS_LONG   32768 /* 1 s, expected 16000000 HF ticks exactly */
+#define LF_GATE_TICKS_SHORT  4096  /* 125 ms, expected 2000000 HF ticks exactly */
+#define LF_GATE_TICKS_JITTER 32    /* ~1 ms, expected 15625 HF ticks exactly */
+
+/* Gates per spread run. One 32 tick gate resolves only to 1 part in 15625, or
+ * 64 ppm, so the spread figure comes from the summed deviation across all
+ * samples rather than from any single gate. 64 samples takes the aggregate
+ * resolution to about 1 ppm.
+ */
+#define LF_JITTER_SAMPLES 64
 
 /* Repeats per gate length. Enough to see the spread that separates a software
  * gate from a hardware-captured one, without turning boot into a long stall.
@@ -55,6 +63,14 @@
  */
 #define LF_PPM_REJECT 2000
 
+/*
+ * TODO: set from bench data, not from a datasheet. Needs a spread reading from
+ * a known good board and one from a board faked broken through BICR
+ * EXT_SQUARE, per the fault injection procedure. Zero means report the spread
+ * and do not act on it, which is where this stands until both numbers exist.
+ */
+#define LF_PPM_SPREAD_REJECT 0
+
 /* Lead time between arming the two compare values and the first one firing.
  * One LF tick is 30.5 us, so four is roughly 122 us, comfortably more than two
  * CC register writes even if something preempts between them. Too small and the
@@ -78,6 +94,22 @@
 #define LF_RTC_CC_END     1
 #define LF_TIMER_CC_START 0
 #define LF_TIMER_CC_END   1
+
+/** @brief Cycle-to-cycle spread across one run of short gates. */
+struct lf_spread {
+	/** Gates that completed. */
+	uint32_t samples;
+	/** Mean HF count across the run. */
+	uint32_t hf_mean;
+	/** Mean absolute deviation in HF ticks, truncated. */
+	uint32_t hf_mad;
+	/** Largest minus smallest HF count. */
+	uint32_t hf_range;
+	/** Deviation against the expected count, in ppm. */
+	uint32_t mad_ppm;
+	/** Range against the expected count, in ppm. */
+	uint32_t range_ppm;
+};
 
 /** @brief What the probe concluded about LFCLK. */
 enum lf_verdict {

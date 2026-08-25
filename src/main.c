@@ -378,6 +378,71 @@ static void lf_gate_report(const char *label, uint32_t gate_ticks,
 	}
 }
 
+/* Mean frequency cannot see a calibrated LFRC. sysctrl keeps it within a few
+ * hundred ppm and at room temperature it can sit inside the noise floor, so the
+ * absolute measurement passes it. Cycle-to-cycle spread can see it: calibration
+ * corrects the average and cannot correct the jitter.
+ *
+ * The reference's own bias is common mode across every sample and cancels in
+ * the deviation, so this is tighter than the absolute figure despite each gate
+ * being 1000 times shorter.
+ *
+ * Mean absolute deviation rather than variance: no squaring, so no risk of
+ * overflow and no temptation to reach for a square root. All integer.
+ */
+static int lf_spread_measure(struct lf_spread *out)
+{
+	static uint32_t hf[LF_JITTER_SAMPLES];
+	struct lf_measurement meas;
+	uint64_t sum = 0;
+	uint64_t mad_sum = 0;
+	uint64_t expected_hf;
+	uint32_t lo = UINT32_MAX;
+	uint32_t hi = 0;
+	int err;
+
+	for (int i = 0; i < LF_JITTER_SAMPLES; i++) {
+		err = lf_capture_measure(LF_GATE_TICKS_JITTER, &meas);
+		if (err) {
+			return err;
+		}
+
+		hf[i] = meas.hf_ticks;
+		sum += hf[i];
+		lo = MIN(lo, hf[i]);
+		hi = MAX(hi, hf[i]);
+	}
+
+	out->samples = LF_JITTER_SAMPLES;
+	out->hf_mean = (uint32_t)(sum / LF_JITTER_SAMPLES);
+	out->hf_range = hi - lo;
+
+	for (int i = 0; i < LF_JITTER_SAMPLES; i++) {
+		mad_sum += (hf[i] > out->hf_mean) ? (hf[i] - out->hf_mean)
+						  : (out->hf_mean - hf[i]);
+	}
+
+	out->hf_mad = (uint32_t)(mad_sum / LF_JITTER_SAMPLES);
+
+	/* Against the expected count, not the measured mean, so a clock that is
+	 * off frequency does not also shift its own spread figure.
+	 */
+	expected_hf = ((uint64_t)LF_GATE_TICKS_JITTER *
+		       counter_get_frequency(hf_counter)) / LF_NOMINAL_HZ;
+	if (expected_hf == 0) {
+		return -EIO;
+	}
+
+	/* From mad_sum rather than the truncated hf_mad, which keeps sub-tick
+	 * resolution: one HF tick in a 32 tick gate is already 64 ppm.
+	 */
+	out->mad_ppm = (uint32_t)((mad_sum * 1000000) /
+				  (expected_hf * LF_JITTER_SAMPLES));
+	out->range_ppm = (uint32_t)(((uint64_t)out->hf_range * 1000000) / expected_hf);
+
+	return 0;
+}
+
 static const char *lf_verdict_str(enum lf_verdict verdict)
 {
 	switch (verdict) {
@@ -460,6 +525,7 @@ static int lf_ref_release(void)
 int main(void)
 {
 	struct lf_measurement meas;
+	struct lf_spread spread;
 	enum lf_verdict verdict;
 	int err;
 
@@ -534,6 +600,23 @@ int main(void)
 	} else {
 		LOG_INF("verdict %s at %d ppm, reject threshold %d ppm",
 			lf_verdict_str(verdict), meas.ppm, LF_PPM_REJECT);
+	}
+
+	err = lf_spread_measure(&spread);
+	if (err) {
+		LOG_ERR("spread run failed (err %d)", err);
+	} else {
+		LOG_INF("spread %u gates of %u LF : mean %u HF, mad %u HF (%u ppm), "
+			"range %u HF (%u ppm)",
+			spread.samples, LF_GATE_TICKS_JITTER, spread.hf_mean,
+			spread.hf_mad, spread.mad_ppm, spread.hf_range, spread.range_ppm);
+
+		if (LF_PPM_SPREAD_REJECT == 0) {
+			LOG_WRN("spread threshold unset, reading is recorded not judged");
+		} else if (spread.mad_ppm > LF_PPM_SPREAD_REJECT) {
+			LOG_WRN("spread %u ppm exceeds %d ppm: calibrated RC rather than a crystal",
+				spread.mad_ppm, LF_PPM_SPREAD_REJECT);
+		}
 	}
 
 	lf_capture_teardown();
