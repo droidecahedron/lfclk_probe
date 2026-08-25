@@ -141,14 +141,14 @@ Same checks as the late probe, short gate. Captured with
 [00:00:11.287,680] <inf> lf_probe: runtime spread 64 gates of 32 LF : mean 15625 HF, mad 0 HF (28 ppm), range 5 HF (320 ppm)
 ```
 
-Four consecutive runtime probes read 20 to 28 ppm of spread on the crystal. The
-spread runs on every judging probe, so a source that changes after boot is still
-checked.
+Four runtime probes read 20-28 ppm of spread on xtal.
 
 ## a crystal dragged off frequency while running
 
 Scope probe held against the `XL1` pad of `X2`, the
 32.768 kHz crystal, on a board that had been up 28 minutes.
+
+Reasoning: If [this](https://docs.nordicsemi.com/r/bundle/ngl_001/page/gl/ngl_001/hfxo_test_circuit.html) exists for HFXO, maybe exists for LFXO.
 
 <img width="420" height="395" alt="image" src="https://github.com/user-attachments/assets/23a90e9e-e3aa-4cdc-ac75-c13d2b6ad1f9" />
 
@@ -318,7 +318,7 @@ removes that offset.
 | `lf_verdict_get()` | capture first, software gate second, then a verdict |
 | `lf_spread_measure()` | cycle-to-cycle deviation over `LF_JITTER_SAMPLES` short gates |
 | `lf_probe_run()` | one scheduled probe plus the fault latch |
-| `lf_monitor_thread()` | early probe, late probe, then the hourly poll |
+| `lf_monitor_thread()` | early probe, late probe, then the hardcoded time based poll |
 
 `lf_verdict_get()` tries the capture first because it's the
 accurate one, and only returns `LF_ABSENT` when the software gate fails too. A
@@ -330,6 +330,8 @@ software reading in the log.
 >![NOTE]
 > Most of what follows cost a bench session to find. None of it is obvious from the
 headers. These are just jostled into this readme as extra content, not core to the app.
+>
+>The following notes are overly verbose.
 
 ## the clock API tells you what was asked for
 
