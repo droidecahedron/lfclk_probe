@@ -77,6 +77,41 @@ static const struct nrf_clock_spec lf_ref_spec = {
 	.precision = NRF_CLOCK_CONTROL_PRECISION_DEFAULT,
 };
 
+/* The config oracle, run once at boot. Costs no measurement: a resolved
+ * accuracy worse than the hfxo node's own figure means the request would land on
+ * open loop at 20000 ppm, so the reference is not a reference. A wrong BICR and
+ * a board variant with no 32 MHz crystal both come out here.
+ */
+static int lf_ref_check(void)
+{
+	struct nrf_clock_spec resolved;
+	uint32_t startup_time_us;
+	int err;
+
+	err = nrf_clock_control_resolve(lf_ref_clock, &lf_ref_spec, &resolved);
+	if (err) {
+		LOG_ERR("fll16m resolve failed (err %d)", err);
+		return err;
+	}
+
+	err = nrf_clock_control_get_startup_time(lf_ref_clock, &lf_ref_spec, &startup_time_us);
+	if (err) {
+		LOG_ERR("fll16m get_startup_time failed (err %d)", err);
+		return err;
+	}
+
+	LOG_INF("fll16m resolved    : %u Hz, %u ppm, precision %u, %u us startup",
+		resolved.frequency, resolved.accuracy, resolved.precision, startup_time_us);
+
+	if (resolved.accuracy > LF_REF_ACCURACY_PPM) {
+		LOG_ERR("reference resolved %u ppm, board declares %u ppm: BICR or board variant?",
+			resolved.accuracy, LF_REF_ACCURACY_PPM);
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+
 /* Condition the reference and report what the board actually gave back. Kept
  * separate from the release so the caller can hold it across a gate only,
  * because bypass mode keeps HFXO running and that costs current.
@@ -99,7 +134,11 @@ static int lf_ref_acquire(void)
 		return err;
 	}
 
-	LOG_INF("fll16m resolved    : %u Hz, %u ppm, precision %u, %u us startup",
+	/* Debug, not info: this runs before every scheduled probe now, and an
+	 * hourly reminder of a figure that cannot change is noise. main() logs it
+	 * once at boot, which is where it matters.
+	 */
+	LOG_DBG("fll16m resolved    : %u Hz, %u ppm, precision %u, %u us startup",
 		resolved.frequency, resolved.accuracy, resolved.precision, startup_time_us);
 
 	/* Config oracle, and it costs no measurement. An accuracy worse than the
@@ -346,38 +385,6 @@ static int lf_capture_measure(uint32_t gate_ticks, struct lf_measurement *out)
 	return 0;
 }
 
-/* Both variants report through here so the two are directly comparable on the
- * bench, which is the only way to see whether the capture actually tightened
- * anything.
- */
-static void lf_gate_report(const char *label, uint32_t gate_ticks,
-			   int (*measure)(uint32_t, struct lf_measurement *))
-{
-	struct lf_measurement meas;
-	int err;
-
-	for (int i = 0; i < LF_GATE_REPEATS; i++) {
-		err = measure(gate_ticks, &meas);
-		if (err == -ETIMEDOUT) {
-			LOG_ERR("%s %u: never closed, LFCLK is not advancing", label, gate_ticks);
-			return;
-		}
-
-		if (err) {
-			LOG_ERR("%s %u: failed (err %d)", label, gate_ticks, err);
-			return;
-		}
-
-		LOG_INF("%s %5u LF : %8u HF, %6u Hz, %5d ppm",
-			label, meas.lf_ticks, meas.hf_ticks, meas.lf_hz, meas.ppm);
-
-		if (meas.ppm > LF_PPM_NOISE_FLOOR || meas.ppm < -LF_PPM_NOISE_FLOOR) {
-			LOG_WRN("%d ppm is outside the %d ppm reference noise floor",
-				meas.ppm, LF_PPM_NOISE_FLOOR);
-		}
-	}
-}
-
 /* Mean frequency cannot see a calibrated LFRC. sysctrl keeps it within a few
  * hundred ppm and at room temperature it can sit inside the noise floor, so the
  * absolute measurement passes it. Cycle-to-cycle spread can see it: calibration
@@ -481,6 +488,12 @@ static int lf_verdict_get(uint32_t gate_ticks, enum lf_verdict *verdict,
 	int cap_err;
 	int soft_err;
 
+	/* Fail safe default. Every error path below returns non-zero and a caller
+	 * must not read the verdict then, but if one does, the conservative answer
+	 * is the alarming one rather than a reassuring LF_OK.
+	 */
+	*verdict = LF_ABSENT;
+
 	cap_err = lf_capture_measure(gate_ticks, meas);
 	if (cap_err == 0) {
 		*verdict = (meas->ppm > LF_PPM_REJECT || meas->ppm < -LF_PPM_REJECT)
@@ -505,6 +518,39 @@ static int lf_verdict_get(uint32_t gate_ticks, enum lf_verdict *verdict,
 	return -EIO;
 }
 
+/* Latches on a bad reading and needs LF_FAULT_CLEAR_STREAK good ones to clear,
+ * so a caller that samples it occasionally still sees that something went wrong.
+ */
+static bool lf_fault_latched;
+static uint8_t lf_good_streak;
+
+static void lf_fault_update(enum lf_verdict verdict)
+{
+	if (verdict != LF_OK) {
+		lf_good_streak = 0;
+
+		if (!lf_fault_latched) {
+			lf_fault_latched = true;
+			LOG_ERR("fault flag latched: %s", lf_verdict_str(verdict));
+		}
+
+		return;
+	}
+
+	if (!lf_fault_latched) {
+		return;
+	}
+
+	if (++lf_good_streak >= LF_FAULT_CLEAR_STREAK) {
+		lf_fault_latched = false;
+		lf_good_streak = 0;
+		LOG_INF("fault flag cleared after %d good readings", LF_FAULT_CLEAR_STREAK);
+	} else {
+		LOG_WRN("fault flag still latched, %u of %d good readings",
+			lf_good_streak, LF_FAULT_CLEAR_STREAK);
+	}
+}
+
 static int lf_ref_release(void)
 {
 	int err;
@@ -522,11 +568,132 @@ static int lf_ref_release(void)
 	return 0;
 }
 
-int main(void)
+/* One scheduled probe. The fabric and the reference are both taken for the gate
+ * and given back after, same as the reference always was: DPPI channels and a
+ * running HFXO are not worth holding for an hour to use them for 125 ms.
+ */
+static void lf_probe_run(const char *phase, uint32_t gate_ticks)
 {
 	struct lf_measurement meas;
-	struct lf_spread spread;
 	enum lf_verdict verdict;
+	int err;
+
+	err = lf_ref_acquire();
+	if (err) {
+		LOG_ERR("%s probe: reference unavailable (err %d)", phase, err);
+		return;
+	}
+
+	lf_capture_setup();
+	err = lf_verdict_get(gate_ticks, &verdict, &meas);
+	lf_capture_teardown();
+
+	(void)lf_ref_release();
+
+	if (err) {
+		LOG_ERR("%s probe: undetermined (err %d)", phase, err);
+		return;
+	}
+
+	if (verdict == LF_ABSENT) {
+		LOG_WRN("%s probe: %s, no gate closed", phase, lf_verdict_str(verdict));
+	} else {
+		LOG_INF("%s probe: %s at %d ppm over %u LF ticks",
+			phase, lf_verdict_str(verdict), meas.ppm, gate_ticks);
+	}
+
+	lf_fault_update(verdict);
+}
+
+static void lf_spread_report(void)
+{
+	/* Zeroed because the compiler cannot see that lf_spread_measure() fills
+	 * every field before returning 0, and a partly-filled spread reading is
+	 * worth reporting as zeros rather than as stack.
+	 */
+	struct lf_spread spread = {0};
+	int err;
+
+	err = lf_ref_acquire();
+	if (err) {
+		LOG_ERR("spread run: reference unavailable (err %d)", err);
+		return;
+	}
+
+	lf_capture_setup();
+	err = lf_spread_measure(&spread);
+	lf_capture_teardown();
+
+	(void)lf_ref_release();
+
+	if (err) {
+		LOG_ERR("spread run failed (err %d)", err);
+		return;
+	}
+
+	LOG_INF("spread %u gates of %u LF : mean %u HF, mad %u HF (%u ppm), range %u HF (%u ppm)",
+		spread.samples, LF_GATE_TICKS_JITTER, spread.hf_mean,
+		spread.hf_mad, spread.mad_ppm, spread.hf_range, spread.range_ppm);
+
+	if (LF_PPM_SPREAD_REJECT == 0) {
+		LOG_WRN("spread threshold unset, reading is recorded not judged");
+	} else if (spread.mad_ppm > LF_PPM_SPREAD_REJECT) {
+		LOG_WRN("spread %u ppm exceeds %d ppm: calibrated RC rather than a crystal",
+			spread.mad_ppm, LF_PPM_SPREAD_REJECT);
+	}
+}
+
+/* Two boot probes because dead and slow-starting differ only in time. A verdict
+ * that goes bad then good between the two means the crystal is present but
+ * slower than BICR claims, so every MPSL timing assumption sized off the
+ * declared budget is wrong until BICR is fixed. Still bad at the late probe
+ * means gone.
+ *
+ * This thread depends on LFCLK for its own scheduling: k_sleep() parks on the
+ * system timer, and GRTC SYSCOUNTER falls back to LFCLK while asleep. If LFCLK
+ * stops outright the CPU never wakes and nothing here runs, which is the one
+ * failure the probe can only be recognised from outside. What it does catch is
+ * the silent RC fallback, where LFCLK keeps ticking at the wrong rate.
+ */
+static void lf_monitor_thread(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	/* Absolute deadlines, not relative sleeps. Both figures are budgets
+	 * measured from boot, and a relative sleep would push the late probe out
+	 * by however long the early one took: 600 ms plus a 1 s gate plus 4400 ms
+	 * lands at 6 s, not 5, which misses the window it was sized for.
+	 */
+	k_sleep(K_TIMEOUT_ABS_MS(LF_PROBE_EARLY_MS));
+	lf_probe_run("early", LF_GATE_TICKS_LONG);
+
+	k_sleep(K_TIMEOUT_ABS_MS(LF_PROBE_LATE_MS));
+	lf_probe_run("late", LF_GATE_TICKS_LONG);
+
+	/* Spread baseline goes here rather than in main(). Measured at 20 ms into
+	 * boot it read a 220 tick range against 2 ticks once settled, because the
+	 * oscillator is still coming up: exactly the intermittent condemnation of
+	 * good hardware that LF_PROBE_LATE_MS exists to avoid.
+	 */
+	lf_spread_report();
+
+	/* Short gate from here on. It is only as good as the long one because
+	 * the capture removed the fixed offset that used to make it 70 ppm
+	 * worse, and 125 ms of held HFXO per hour is cheaper than a second.
+	 */
+	for (;;) {
+		k_sleep(K_MSEC(LF_MONITOR_PERIOD_MS));
+		lf_probe_run("runtime", LF_GATE_TICKS_SHORT);
+	}
+}
+
+K_THREAD_DEFINE(lf_monitor, LF_MONITOR_STACK_SIZE, lf_monitor_thread, NULL, NULL, NULL,
+		LF_MONITOR_PRIO, 0, 0);
+
+int main(void)
+{
 	int err;
 
 	LOG_INF("lf_probe on %s", CONFIG_BOARD_TARGET);
@@ -575,61 +742,15 @@ int main(void)
 		return err;
 	}
 
-	err = lf_ref_acquire();
+	/* Boot-time config check only. Everything that measures now runs on the
+	 * monitor thread, because main() is higher priority and busy-waiting gates
+	 * here starve it: eleven seconds of them pushed the 600 ms early probe out
+	 * to 13 s, which defeats the only thing that probe is for.
+	 */
+	err = lf_ref_check();
 	if (err) {
 		return err;
 	}
-
-	lf_gate_report("soft", LF_GATE_TICKS_LONG, lf_gate_measure);
-	lf_gate_report("soft", LF_GATE_TICKS_SHORT, lf_gate_measure);
-
-	/* Kept alongside the software gate rather than replacing it. The bridge
-	 * is the part most likely to be wrong on a board or SoC variant, and a
-	 * capture that never fires reports -ETIMEDOUT rather than hanging, so the
-	 * software figures stay available as the fallback.
-	 */
-	lf_capture_setup();
-	lf_gate_report("cap ", LF_GATE_TICKS_LONG, lf_capture_measure);
-	lf_gate_report("cap ", LF_GATE_TICKS_SHORT, lf_capture_measure);
-
-	err = lf_verdict_get(LF_GATE_TICKS_LONG, &verdict, &meas);
-	if (err) {
-		LOG_ERR("verdict undetermined (err %d)", err);
-	} else if (verdict == LF_ABSENT) {
-		LOG_WRN("verdict %s: no gate closed", lf_verdict_str(verdict));
-	} else {
-		LOG_INF("verdict %s at %d ppm, reject threshold %d ppm",
-			lf_verdict_str(verdict), meas.ppm, LF_PPM_REJECT);
-	}
-
-	err = lf_spread_measure(&spread);
-	if (err) {
-		LOG_ERR("spread run failed (err %d)", err);
-	} else {
-		LOG_INF("spread %u gates of %u LF : mean %u HF, mad %u HF (%u ppm), "
-			"range %u HF (%u ppm)",
-			spread.samples, LF_GATE_TICKS_JITTER, spread.hf_mean,
-			spread.hf_mad, spread.mad_ppm, spread.hf_range, spread.range_ppm);
-
-		if (LF_PPM_SPREAD_REJECT == 0) {
-			LOG_WRN("spread threshold unset, reading is recorded not judged");
-		} else if (spread.mad_ppm > LF_PPM_SPREAD_REJECT) {
-			LOG_WRN("spread %u ppm exceeds %d ppm: calibrated RC rather than a crystal",
-				spread.mad_ppm, LF_PPM_SPREAD_REJECT);
-		}
-	}
-
-	lf_capture_teardown();
-
-	/* Released whatever the gates reported. Holding HFXO past the
-	 * measurement only burns current.
-	 */
-	err = lf_ref_release();
-	if (err) {
-		return err;
-	}
-
-	LOG_INF("fll16m released");
 
 	return 0;
 }

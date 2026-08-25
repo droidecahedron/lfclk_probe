@@ -38,11 +38,6 @@
  */
 #define LF_JITTER_SAMPLES 64
 
-/* Repeats per gate length. Enough to see the spread that separates a software
- * gate from a hardware-captured one, without turning boot into a long stall.
- */
-#define LF_GATE_REPEATS 5
-
 /* Margin allowed on top of a gate's own expected duration before the gate is
  * called dead. A gate that never closes means LFCLK is not advancing, which is
  * an outcome rather than an error.
@@ -70,6 +65,40 @@
  * and do not act on it, which is where this stands until both numbers exist.
  */
 #define LF_PPM_SPREAD_REJECT 0
+
+/* The board's declared LFCLK startup budget, which is what
+ * nrf_clock_control_get_startup_time() reports for an LFXO accuracy request on
+ * this DK. A probe at this point separates dead from slow-starting, because the
+ * two differ only in time.
+ */
+#define LF_PROBE_EARLY_MS 600
+
+/* Clears the LFXO calibration window. Calibration takes roughly 3.5 to 4 s
+ * after a BICR write and timing is not accurate until it finishes, so probing
+ * before this condemns good hardware intermittently.
+ */
+#define LF_PROBE_LATE_MS 5000
+
+/* Hourly re-probe. A poll rather than a callback because nothing re-evaluates a
+ * satisfied clock request: a crystal that dies at month six leaves every
+ * clock_control API returning its day-one value.
+ */
+#define LF_MONITOR_PERIOD_MS 3600000
+
+/* Consecutive good readings needed to clear a latched fault. Two, not one: a
+ * single good gate after a bad one is as likely to be a marginal crystal
+ * drifting back through tolerance as a real recovery, and clearing on it would
+ * hide the fault from anything that polls less often than the probe.
+ */
+#define LF_FAULT_CLEAR_STREAK 2
+
+/* The monitor gets its own thread because a gate can busy-wait for a second,
+ * which has no business on the system work queue. Low priority and preemptible:
+ * the captured gate does not care about being preempted, since both boundaries
+ * are taken in hardware.
+ */
+#define LF_MONITOR_STACK_SIZE 1024
+#define LF_MONITOR_PRIO       K_PRIO_PREEMPT(10)
 
 /* Lead time between arming the two compare values and the first one firing.
  * One LF tick is 30.5 us, so four is roughly 122 us, comfortably more than two
