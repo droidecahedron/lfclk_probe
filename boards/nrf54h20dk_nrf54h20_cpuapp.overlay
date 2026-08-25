@@ -38,3 +38,13 @@
 &timer130 {
 	status = "okay";
 };
+
+/*
+ * timer130's clock parent, needed as a device and not just as a DT phandle so
+ * accuracy can be requested on it before the gate. Disabled in nrf54h20.dtsi;
+ * zephyr/tests/drivers/clock_control/nrf_clock_control has the same one-liner
+ * in its cpuapp overlay.
+ */
+&fll16m {
+	status = "okay";
+};
