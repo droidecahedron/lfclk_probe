@@ -424,6 +424,34 @@ EVT_APPLIED with src=LFRC does not imply an RC clock.
 the secure domain, and `cpuapp`'s own tick via GRTC, so an application asking for
 a worse clock gets subsumed. That also means you can't inject a fault this way.
 
+## nrf_clock_is_running() isn't available here
+
+Coming from a 52, the first reach is `nrf_clock_is_running()` in
+`<ncs>/modules/hal/nordic/nrfx/hal/nrf_clock.h:723`. It doesn't compile on this
+part, and wouldn't answer the question if it did.
+
+It wants an `NRF_CLOCK_Type *`. There is no `CLOCK` peripheral on nRF54H20 —
+`NRF_CLOCK` gets zero hits in
+`<ncs>/modules/hal/nordic/nrfx/bsp/stable/mdk/nrf54h20_global.h`, against 18 other
+parts in that directory that define it (52-series, `nRF54L`, `nRF7120`). Zephyr
+gates the include the same way, `#if defined(CONFIG_CLOCK_CONTROL_NRF)` at
+`<ncs>/zephyr/include/zephyr/drivers/clock_control/nrf_clock_control.h:18`, which
+is the 52/53 path and not set for this build. H20's `LFCLK` lives behind SCFW, so
+you go through `nrfs_clock` and the `nordic,nrf-lfclk` driver.
+
+On the parts where it does exist, its `p_clk_src` out-param reports which source
+was selected and whether the domain started. It latches a request, same as the
+two above. The `nRF54L15` PS spells that out for `LFCLK.STAT.SRC`: it holds
+whatever `SRCCOPY` held when `LFCLKSTARTED` triggered.
+
+That reads `SRC = XTAL` while the crystal sits at 61% of nominal, which is the
+fault at
+[a crystal dragged off frequency while running](#a-crystal-dragged-off-frequency-while-running).
+Every register answer shares the flaw: it reports a decision software made, and a
+dying crystal doesn't participate in decisions. Counting `LFCLK` against `HFXO`
+asks nobody. Two oscillators, and the ratio can't agree with itself unless both
+are right.
+
 ## RTC compare events need EVTEN
 
 > An nRF RTC won't set `EVENTS_COMPARE[n]` on match unless the matching `EVTEN`
