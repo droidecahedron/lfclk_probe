@@ -394,7 +394,7 @@ fails while the software gate still reads a healthy clock you get `-EIO` and the
 software reading in the log.
 
 
->![NOTE]
+>[!NOTE]
 > Most of what follows cost a bench session to find. None of it is obvious from the
 headers. These are just jostled into this readme as extra content, not core to the app.
 >
