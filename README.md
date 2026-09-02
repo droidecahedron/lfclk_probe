@@ -9,19 +9,19 @@ doesn't edit `BICR`. There aren't convenient XOSTATs to look at.
 
 > [!IMPORTANT]
 > I couldn't fully include an xtal failure, so that decision tree is still TBD.
-> But it does catch an xtal slowdown/degrade.
+> But it does catch an xtal slowdown/degrade in my testing, below.
 
 # Requirements
 
 Hardware
 
-- `nRF54H20 DK`, `PCA10175`
+- `nRF54H20 DK`/`PCA10175`
 
 Software
 
 - `nRF Connect SDK v3.4.0` (`v3.4.0-99553055607b`)
 - board target `nrf54h20dk/nrf54h20/cpuapp`
-- sample memory: | flash / RAM | 58260 B / 15656 B |
+- sample memory: ` flash / RAM : 58260 B / 15656 B `
 
 # Overview
 
@@ -140,7 +140,9 @@ west build -b nrf54h20dk/nrf54h20/cpuapp
 west flash
 ```
 
-Console is `uart136` on VCOM0, 115200 baud. On the DK that's `/dev/ttyACM0`.
+Console is `uart136` on VCOM0. (or `/dev/ttyACM0`.)
+
+rate: `115200,8,n,1`
 
 # Example Output
 
@@ -179,7 +181,7 @@ spread between 19 and 58 ppm against a 150 ppm threshold.
 `fll16m` resolves at 30 ppm so the ref contributes more uncertainty. 
 
 
-## the probe
+## probe
 
 Same checks as the late probe, short gate. Captured with
 `LF_MONITOR_PERIOD_MS` shortened to 5 s.
@@ -286,9 +288,9 @@ way.
 
 ## the fault latch clearing
 
-The RC board never recovers, so clearing needs a fault that goes away.
-`LF_PPM_REJECT` set to 3, between the long gate's -6 ppm and the short gate's
-0 ppm, so the boot probes fail and the runtime probes pass.
+RC board never recovers, clearing needs a fault that goes away.
+`LF_PPM_REJECT` set to 3, between the long gate -6 ppm and the short gate 0 ppm.
+So the boot probes fail and the runtime probes pass.
 `LF_MONITOR_PERIOD_MS` shortened to 4 s to make it watchable.
 
 ```
@@ -330,43 +332,14 @@ Both sides, one DK, room temperature, spread taken inside the probe:
 | crystal, 14 boots | -6 to -7 ppm | 19-58 ppm | `LF_OK`, nothing latched |
 | LFRC, 9 boots | -33 to +56 ppm | 248-622 ppm | `LF_WRONG_SRC`, latched |
 
-The mean overlaps completely. MAD separates by 4.3x, which is where the 150 ppm
+avg overlaps, MAD separates by 4.3x, which is where the 150 ppm
 threshold comes from: 2.6x above the worst crystal reading, 1.65x below the
 quietest RC one.
 
+> [!NOTE]
 > Measure the spread inside the probe, right after the gate. An earlier version
 > ran it from a fresh `lf_ref_acquire()` and read 76-110 ppm on the same
 > crystal, because it was measuring the HFXO ramp along with the LF source.
-
-## proof the measurement is real
-
-The number that matters is not any single reading, it's that two gate lengths
-differing by 8x agree. Five repeats each, `fll16m` held at 30 ppm.
-
-| gate | mean | spread |
-| --- | --- | --- |
-| software, 32768 LF (1 s) | +6 ppm | 24 ppm |
-| software, 4096 LF (125 ms) | +71 to +84 ppm | 26-30 ppm |
-| captured, 32768 LF | -7 ppm | 2 HF ticks, 0.125 ppm |
-| captured, 4096 LF | -7 ppm | 1 HF tick, 0.5 ppm |
-
-The captured gates agree to the digit at both lengths, so the residual is a real
-frequency offset. The software gate does not, because it carries a fixed
-read-pair latency:
-
-| gate | expected HF | mean actual | shortfall |
-| --- | --- | --- | --- |
-| 32768 LF | 16000000 | 15999901 | -99 ticks, 6.2 us |
-| 4096 LF | 2000000 | 1999858 | -142 ticks, 8.9 us |
-
-Same absolute shortfall either way. A fixed time error scales as 1/gate-length
-in ppm, so 99 ticks of 16e6 is 6 ppm and 142 of 2e6 is 71 ppm. The DPPI gate
-removes that offset.
-
-> The software rows and the captured rows come from different commits, so these
-> are two measurement campaigns. Read-pair latency accounts for about 6 of the
-> 13 ppm between the two long-gate means. The remainder is unexplained and sits
-> inside the reference's own 30 ppm.
 
 # Software Description
 
@@ -378,7 +351,7 @@ removes that offset.
 
 | function | job |
 | --- | --- |
-| `lf_ref_check()` | boot config oracle. Resolved accuracy against what the board declares |
+| `lf_ref_check()` | boot config oracle, resolves accuracy against what the board declares |
 | `lf_ref_acquire()` / `lf_ref_release()` | hold `fll16m` at its best accuracy for the gate |
 | `lf_gate_measure()` | software gate. Fallback, and the discriminator for DPPI route faults |
 | `lf_capture_measure()` | DPPI-captured gate |
@@ -388,7 +361,8 @@ removes that offset.
 | `lf_monitor_thread()` | early probe, late probe, then the hardcoded time based poll |
 
 `lf_verdict_get()` tries the capture first because it's the
-accurate one, and only returns `LF_ABSENT` when the software gate fails too. A
+accurate one, and only returns `LF_ABSENT` when the software gate fails too.
+
 misconfigured DPPI route times out exactly like a dead clock, so if the capture
 fails while the software gate still reads a healthy clock you get `-EIO` and the
 software reading in the log.
