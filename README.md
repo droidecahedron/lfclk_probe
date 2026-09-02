@@ -1,25 +1,27 @@
 # lfclk_probe
 
-An `LFCLK` health probe for the `nRF54H20`. It counts `LFCLK` against an
-`HFXO`-derived reference and tells you whether the low frequency clock is running
+An `LFCLK` health probe for the `nRF54H20`. 
+It counts `LFCLK` against an `HFXO`-derived reference and tells you whether the low frequency clock is running
 on the crystal, on an RC source, or not at all.
 
-Nothing in the clock stack will tell you this. `clock_control` resolves 20 ppm on
-this board, but that number is read back out of `BICR`, and a broken crystal
-doesn't edit `BICR`. So you measure.
+`clock_control` resolves 20 ppm on this board, but that number is read back out of `BICR`, and a broken crystal
+doesn't edit `BICR`. There aren't convenient XOSTATs to look at.
+
+> [!IMPORTANT]
+> I couldn't fully include an xtal failure, so that decision tree is still TBD.
+> But it does catch an xtal slowdown/degrade.
 
 # Requirements
 
 Hardware
 
 - `nRF54H20 DK`, `PCA10175`
-- nothing else. No pins, no wiring, no external parts
 
 Software
 
 - `nRF Connect SDK v3.4.0` (`v3.4.0-99553055607b`)
-- Zephyr `4.4.0` (`v4.4.0-bf801e4e3d19`)
 - board target `nrf54h20dk/nrf54h20/cpuapp`
+- sample memory: | flash / RAM | 58260 B / 15656 B |
 
 # Overview
 
@@ -27,7 +29,7 @@ Software
 `HFXO` straight through. `RTC COMPARE` opens and closes a window of known length
 in LF ticks, and the HF ticks inside that window give you the ratio.
 
-In short: open a window a known number of LFCLK ticks wide, count HFCLK ticks
+Sample opens a window a known number of LFCLK ticks wide, count HFCLK ticks
 inside it, and compare against what the count should be.
 
 ```
@@ -55,7 +57,7 @@ What the boot sequence does:
    +-- every hour, short gate + 64 short
 ```
 
-How one probe decides:
+eval decision tree
 
 ```
   captured gate
@@ -72,7 +74,7 @@ How one probe decides:
          +-- software gate fine        -> -EIO       routing broken, clock fine
 ```
 
-A bad verdict latches a fault flag. Two good readings clear it.
+1 bad verdict latches a fault flag, 2 good readings clear it.
 
 The two counters sit on different peripheral buses, so the event crosses a PPIB
 bridge:
@@ -89,14 +91,14 @@ rtc130 EVENTS_COMPARE[0,1]        bus 0x5f92_0000
                      +-- timer130 TASKS_CAPTURE[0,1]   bus 0x5f9a_0000
 ```
 
-The gate is that window: N LF ticks wide, HF ticks counted inside it.
+The gate is the following window: N LF ticks wide, HF ticks counted inside it.
 
 | gate | boundaries taken by |
 | --- | --- |
 | software | CPU register reads |
 | captured | RTC COMPARE firing TIMER CAPTURE over DPPI |
 
-Three verdicts come out:
+Three decisions based on the gate
 
 | verdict | means | threshold |
 | --- | --- | --- |
@@ -104,22 +106,20 @@ Three verdicts come out:
 | `LF_WRONG_SRC` | running on an RC source | mean outside `LF_PPM_REJECT` (2000 ppm), or spread outside `LF_PPM_SPREAD_REJECT` (150 ppm) |
 | `LF_ABSENT` | `LFCLK` not advancing | no gate closed |
 
-Schedule, all measured from boot:
 
-| when | gate | why there |
+| time after boot | gate | why there |
 | --- | --- | --- |
 | 600 ms | 1 s, mean only | the board's declared startup budget |
 | 5 s | 1 s plus 64 x 32 LF ticks | clears the `LFXO` calibration window |
-| hourly | 125 ms plus 64 x 32 LF ticks | nothing re-evaluates a satisfied clock request |
+| hourly (configurable) | 125 ms plus 64 x 32 LF ticks | nothing re-evaluates a satisfied clock request |
 
-The early probe judges the mean only. At 20 ms into boot the spread read a 220 HF
-tick range against 2 once settled, so judging it that early condemns good
-hardware. That probe is there to separate dead from slow-starting, which the mean
-already does.
+The early probe avg. At 20 ms into boot the spread read a 220 HF
+tick range against 2 once settled, so judging it that early can be false alarm.
+Probe is there to separate dead from slow-starting.
 
 ## SoC resources
 
-| resource | what it takes |
+| resource | what sample uses |
 | --- | --- |
 | `RTC` | `rtc130`, CC 0 and 1 |
 | `TIMER` | `timer130`, CC 0 and 1 |
@@ -127,8 +127,8 @@ already does.
 | PPIB | `PPIB130` ch 18 and 19 to `PPIB134` ch 2 and 3 |
 | `fll16m` | held for the gate only, released after |
 | threads | one, 1024 B stack, `K_PRIO_PREEMPT(10)` |
-| pins | none |
-| flash / RAM | 58260 B / 15656 B |
+| pins | N/A |
+
 
 Leaves you `rtc131`, `timer131` through `timer137`, and DPPI channels 0, 1, and
 4 through 7.
@@ -173,11 +173,11 @@ Stock `BICR`, crystal fitted and working.
 [00:00:06.091,362] <inf> lf_probe: late spread 64 gates of 32 LF : mean 15625 HF, mad 0 HF (30 ppm), range 3 HF (192 ppm)
 ```
 
-The ratio sits within 8 ppm of nominal across 14 boots, and the spread between
-19 and 58 ppm against a 150 ppm threshold. Do not read the 8 ppm as the `LFXO`'s
-error: `fll16m` resolves at 30 ppm, so the reference contributes more uncertainty
-than the figure itself. What this says is that nothing is wrong, not how good the
-crystal is.
+The ratio sits within 8 ppm of good across 14 boots
+spread between 19 and 58 ppm against a 150 ppm threshold.
+
+`fll16m` resolves at 30 ppm so the ref contributes more uncertainty. 
+
 
 ## the probe
 
