@@ -43,7 +43,7 @@ inside it, and compare against what the count should be.
      never closed   clock is not advancing
 ```
 
-What the boot sequence does:
+Boot sequence:
 
 ```
   boot
@@ -146,8 +146,7 @@ rate: `115200,8,n,1`
 
 # Example Output
 
-Every verdict below came off the shipping build under a real hardware condition.
-What produced each one:
+Every verdict below came off the shipping build on hardware.
 
 | verdict | condition | how it was produced |
 | --- | --- | --- |
@@ -233,15 +232,15 @@ loop and got pulled up to 12 kHz off resonance by probe capacitance, and the
 drag scaled with how hard the pad was contacted. Detected within one probe
 interval, 5 s here.
 
-> `LF_PPM_REJECT` caught this, not the spread. At -629021 ppm it is 300x past the
-> 2000 ppm threshold. The spread check exists for the calibrated RC case where
-> the mean is useless; this is the coarse detector earning its place.
+> `LF_PPM_REJECT` caught this. At -629021 ppm it is 300x past the 2000 ppm
+> threshold. The spread check exists for the calibrated RC case where the mean
+> is useless.
 
 > No spread line appears on those two probes. `lf_verdict_get()` returns
-> `LF_WRONG_SRC` from the mean and skips the spread measurement, so the missing
-> line is correct behaviour rather than a dropped log.
+> `LF_WRONG_SRC` from the mean and skips the spread measurement, so no spread
+> line is logged.
 
-`XL1` on `X2` is a small pad and wants deliberate contact, not a light touch.
+`XL1` on `X2` is a small pad and wants deliberate contact.
 
 ## an LF counter that is not advancing
 
@@ -256,8 +255,8 @@ indistinguishable from a dead `LFCLK`: the value never changes.
 ```
 
 The early probe reports at 6.62 s. It tried the captured gate, timed out at 3 s,
-fell back to the software gate, and timed out again. `LF_ABSENT` costs about 6 s per probe and needs both gates to
-fail, which is the discriminator doing its job.
+fell back to the software gate, and timed out again. `LF_ABSENT` costs about
+6 s per probe and needs both gates to fail.
 
 The late probe ran back to back at 12.62 s instead of being skipped, because its
 absolute 5 s deadline had already passed when the early probe finished.
@@ -278,10 +277,9 @@ capture failed (err -5) but the software gate read -12 ppm: DPPI route fault, no
 early probe: undetermined (err -5)
 ```
 
-The captured gate died, the software gate read a healthy clock, so the probe
-reports the route rather than condemning the crystal. Cause here was register
-contention rather than a broken bridge, and the branch behaves the same either
-way.
+The captured gate died and the software gate read a healthy clock, so the probe
+reports the route. The cause here was register contention. A broken bridge takes
+the same branch.
 
 > Do not share `rtc130` or `timer130` with anything else. They are the
 > measurement pair. `rtc131` and `timer131` are free and run on the same clocks.
@@ -322,10 +320,11 @@ and `LFCLK` runs on the internal RC with autocalibration on.
 
 `LF_WRONG_SRC` on a clock whose mean error is 1 ppm. A calibrated `LFRC` on this
 DK reads better than the crystal in absolute terms and clears `LF_PPM_REJECT` by
-three decades. The spread is what condemns it, and it feeds the verdict and the fault
-latch rather than only printing a warning.
+three decades. The spread condemns it, and it feeds the verdict and the fault
+latch.
 
-Both sides, one DK, room temperature, spread taken inside the probe:
+Both sides were measured on one DK at room temperature, spread taken inside the
+probe:
 
 | condition | mean at late probe | spread MAD | verdict |
 | --- | --- | --- | --- |
