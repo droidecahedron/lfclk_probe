@@ -35,45 +35,45 @@ names call a window a gate, and the CPU window the software gate.
 
 ```mermaid
 flowchart LR
-    %% rtc130 counts the 32 kHz you do not trust, timer130 the 16 MHz you do
-    lf["rtc130<br/>LFCLK, 32768 Hz"] -->|"COMPARE 0, 1"| win["window<br/>32768 LF ticks"]
-    hf["timer130<br/>fll16m bypass, HFXO 16 MHz"] -->|"CAPTURE 0, 1"| win
-    win --> right["16000000 HF ticks<br/>clock right"]
-    win --> slow["more HF ticks<br/>clock slow, by the ratio"]
-    win --> dead["never closes<br/>clock not advancing"]
+    lf["rtc130<br/>LFCLK under test"] -->|"COMPARE 0 opens<br/>COMPARE 1 closes"| win["window<br/>32768 LF ticks"]
+    hf["timer130<br/>HFXO reference"] -->|"counts HF ticks"| win
+    win -->|"16000000"| right["clock right"]
+    win -->|"more"| slow["clock slow"]
+    win -->|"never closes"| dead["clock not advancing"]
 ```
 
 The counters sit on different peripheral buses, so the event crosses a PPIB
 bridge.
 
 ```mermaid
-flowchart TD
-    rtc["rtc130 EVENTS_COMPARE[0,1]<br/>bus 0x5f92_0000"] --> d130["DPPIC130 ch 2, 3"]
-    d130 --> p130["PPIB130 ch 18, 19"]
-    %% IronSide SE sets up the bridge from UICR
-    p130 ==>|bridge| p134["PPIB134 ch 2, 3"]
-    p134 --> d133["DPPIC133 ch 2, 3"]
-    d133 --> tmr["timer130 TASKS_CAPTURE[0,1]<br/>bus 0x5f9a_0000"]
+flowchart LR
+    subgraph busA["bus 0x5f92_0000"]
+        rtc["rtc130<br/>COMPARE 0, 1"] --> d130["DPPIC130<br/>ch 2, 3"]
+    end
+    subgraph bridge["PPIB bridge, set up by IronSide SE"]
+        p130["PPIB130<br/>ch 18, 19"] ==> p134["PPIB134<br/>ch 2, 3"]
+    end
+    subgraph busB["bus 0x5f9a_0000"]
+        d133["DPPIC133<br/>ch 2, 3"] --> tmr["timer130<br/>CAPTURE 0, 1"]
+    end
+    d130 --> p130
+    p134 --> d133
 ```
 
 Boot sequence:
 
 ```mermaid
-flowchart TD
-    boot(["boot"]) --> dt["log devicetree claims<br/>32768 Hz, BICR 20 ppm"]
-    %% ask fll16m for its best accuracy, get 30 ppm
-    dt --> ref["condition the reference"]
-    %% separates dead from slow to start
-    ref --> early["600 ms<br/>1 s window, mean only"]
-    %% past the LFXO calibration window
-    early --> late["5 s<br/>1 s window + 64 x 32-tick windows"]
-    late --> poll["hourly<br/>125 ms window + 64 x 32-tick windows"]
-    poll --> poll
+flowchart LR
+    boot(["boot"]) --> ref["main()<br/>log devicetree<br/>check fll16m"]
+    ref --> early["600 ms<br/>1 s window<br/>mean only"]
+    early --> late["5 s<br/>1 s window<br/>mean + spread"]
+    late --> poll["hourly<br/>125 ms window<br/>mean + spread"]
+    poll -->|"LF_MONITOR_PERIOD_MS"| poll
 ```
 
 600 ms is the board's declared `LFXO` startup budget. 5 s clears the `LFXO`
-calibration window. The poll period is `LF_MONITOR_PERIOD_MS`, because nothing
-re-evaluates a satisfied clock request.
+calibration window. The poll exists because nothing re-evaluates a satisfied
+clock request. Spread is 64 windows of 32 LF ticks each.
 
 The early probe judges the mean only. At 20 ms into boot the spread read a
 220 HF tick range against 2 once settled, so judging it early raises false alarms.
@@ -81,17 +81,19 @@ The early probe judges the mean only. At 20 ms into boot the spread read a
 Decision per probe:
 
 ```mermaid
-flowchart TD
-    cap{"DPPI window closed?"}
-    cap -->|yes| mean{"mean off by over<br/>LF_PPM_REJECT, 2000 ppm?"}
+flowchart LR
+    cap{"DPPI window<br/>closed?"}
+    cap -->|yes| mean{"mean over<br/>2000 ppm?"}
     mean -->|yes| wrong1["LF_WRONG_SRC<br/>RC source"]
-    mean -->|no| spread{"spread over<br/>LF_PPM_SPREAD_REJECT, 150 ppm?"}
+    mean -->|no| spread{"spread over<br/>150 ppm?"}
     spread -->|yes| wrong2["LF_WRONG_SRC<br/>RC source"]
     spread -->|no| ok["LF_OK<br/>crystal running"]
-    cap -->|no| sw{"CPU window closed?"}
+    cap -->|no| sw{"CPU window<br/>closed?"}
     sw -->|no| absent["LF_ABSENT<br/>clock not advancing"]
     sw -->|yes| eio["-EIO<br/>route broken, clock fine"]
 ```
+
+The thresholds are `LF_PPM_REJECT` and `LF_PPM_SPREAD_REJECT` in `src/lf_probe.h`.
 
 A bad verdict latches a fault flag. Two good readings clear it.
 
