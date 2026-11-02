@@ -225,7 +225,7 @@ interval, 5 s here.
 ## an LF counter that is not advancing
 
 `counter_stop(rtc130)`, so the counter does not tick. To the probe that is
-indistinguishable from a dead `LFCLK`: the value never changes.
+indistinguishable from a dead `LFCLK`, since the value never changes.
 
 ```
 [00:00:00.020,446] <wrn> lf_probe: SCRATCH: rtc130 stopped, LF counter will not advance
