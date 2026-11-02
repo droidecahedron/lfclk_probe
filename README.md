@@ -25,97 +25,75 @@ Software
 
 # Overview
 
-`rtc130` counts `LFCLK`. `timer130` counts `fll16m`, held in bypass so it is
-`HFXO` straight through. `RTC COMPARE` opens and closes a window of known length
-in LF ticks, and the HF ticks inside that window give you the ratio.
+`rtc130` counts `LFCLK`. `timer130` counts `fll16m` in bypass, which is `HFXO`
+straight through. `RTC COMPARE` opens and closes a window N LF ticks wide, and
+the HF count inside it gives the ratio.
 
-Sample opens a window a known number of LFCLK ticks wide, count HFCLK ticks
-inside it, and compare against what the count should be.
+The DPPI window has `RTC COMPARE` trigger `TIMER CAPTURE` at both edges. The CPU
+window reads both counters in software and is the fallback. Logs and function
+names call a window a gate, and the CPU window the software gate.
 
+```mermaid
+flowchart LR
+    %% rtc130 counts the 32 kHz you do not trust, timer130 the 16 MHz you do
+    lf["rtc130<br/>LFCLK, 32768 Hz"] -->|"COMPARE 0, 1"| win["window<br/>32768 LF ticks"]
+    hf["timer130<br/>fll16m bypass, HFXO 16 MHz"] -->|"CAPTURE 0, 1"| win
+    win --> right["16000000 HF ticks<br/>clock right"]
+    win --> slow["more HF ticks<br/>clock slow, by the ratio"]
+    win --> dead["never closes<br/>clock not advancing"]
 ```
-  rtc130    counts the 32 kHz you do not trust
-  timer130  counts the 16 MHz you do
 
-  window 32768 LF ticks wide, expect 16000000 HF ticks
+The counters sit on different peripheral buses, so the event crosses a PPIB
+bridge.
 
-     got 16000000   clock is right
-     got 26000000   clock is slow, by the ratio
-     never closed   clock is not advancing
+```mermaid
+flowchart TD
+    rtc["rtc130 EVENTS_COMPARE[0,1]<br/>bus 0x5f92_0000"] --> d130["DPPIC130 ch 2, 3"]
+    d130 --> p130["PPIB130 ch 18, 19"]
+    %% IronSide SE sets up the bridge from UICR
+    p130 ==>|bridge| p134["PPIB134 ch 2, 3"]
+    p134 --> d133["DPPIC133 ch 2, 3"]
+    d133 --> tmr["timer130 TASKS_CAPTURE[0,1]<br/>bus 0x5f9a_0000"]
 ```
 
 Boot sequence:
 
-```
-  boot
-   |
-   +-- log what devicetree claims        32768 Hz, BICR says 20 ppm
-   +-- condition the reference           ask fll16m for its best, get 30 ppm
-   |
-   +-- 600 ms   long gate, mean only     dead or just slow to start?
-   +-- 5 s      long gate + 64 short     past the LFXO calibration window
-   |
-   +-- every hour, short gate + 64 short
-```
-
-eval decision tree
-
-```
-  captured gate
-   |
-   +-- worked
-   |     |
-   |     +-- mean off by more than 2000 ppm?  yes -> LF_WRONG_SRC
-   |     +-- spread over 150 ppm?             yes -> LF_WRONG_SRC
-   |     +-- neither                              -> LF_OK
-   |
-   +-- failed
-         |
-         +-- software gate failed too  -> LF_ABSENT  clock not advancing
-         +-- software gate fine        -> -EIO       routing broken, clock fine
+```mermaid
+flowchart TD
+    boot(["boot"]) --> dt["log devicetree claims<br/>32768 Hz, BICR 20 ppm"]
+    %% ask fll16m for its best accuracy, get 30 ppm
+    dt --> ref["condition the reference"]
+    %% separates dead from slow to start
+    ref --> early["600 ms<br/>1 s window, mean only"]
+    %% past the LFXO calibration window
+    early --> late["5 s<br/>1 s window + 64 x 32-tick windows"]
+    late --> poll["hourly<br/>125 ms window + 64 x 32-tick windows"]
+    poll --> poll
 ```
 
-1 bad verdict latches a fault flag, 2 good readings clear it.
+600 ms is the board's declared `LFXO` startup budget. 5 s clears the `LFXO`
+calibration window. The poll period is `LF_MONITOR_PERIOD_MS`, because nothing
+re-evaluates a satisfied clock request.
 
-The two counters sit on different peripheral buses, so the event crosses a PPIB
-bridge:
+The early probe judges the mean only. At 20 ms into boot the spread read a
+220 HF tick range against 2 once settled, so judging it early raises false alarms.
 
+Decision per probe:
+
+```mermaid
+flowchart TD
+    cap{"DPPI window closed?"}
+    cap -->|yes| mean{"mean off by over<br/>LF_PPM_REJECT, 2000 ppm?"}
+    mean -->|yes| wrong1["LF_WRONG_SRC<br/>RC source"]
+    mean -->|no| spread{"spread over<br/>LF_PPM_SPREAD_REJECT, 150 ppm?"}
+    spread -->|yes| wrong2["LF_WRONG_SRC<br/>RC source"]
+    spread -->|no| ok["LF_OK<br/>crystal running"]
+    cap -->|no| sw{"CPU window closed?"}
+    sw -->|no| absent["LF_ABSENT<br/>clock not advancing"]
+    sw -->|yes| eio["-EIO<br/>route broken, clock fine"]
 ```
-rtc130 EVENTS_COMPARE[0,1]        bus 0x5f92_0000
-   |
-   +-- DPPIC130 ch 2,3
-         |
-         +-- PPIB130 ch 18,19  ==>  PPIB134 ch 2,3     bridge, set up by
-               |                                       IronSide SE from UICR
-               +-- DPPIC133 ch 2,3
-                     |
-                     +-- timer130 TASKS_CAPTURE[0,1]   bus 0x5f9a_0000
-```
 
-The gate is the following window: N LF ticks wide, HF ticks counted inside it.
-
-| gate | boundaries taken by |
-| --- | --- |
-| software | CPU register reads |
-| captured | RTC COMPARE firing TIMER CAPTURE over DPPI |
-
-Three decisions based on the gate
-
-| verdict | means | threshold |
-| --- | --- | --- |
-| `LF_OK` | crystal present and running | within `LF_PPM_REJECT` |
-| `LF_WRONG_SRC` | running on an RC source | mean outside `LF_PPM_REJECT` (2000 ppm), or spread outside `LF_PPM_SPREAD_REJECT` (150 ppm) |
-| `LF_ABSENT` | `LFCLK` not advancing | no gate closed |
-
-
-| time after boot | gate | why there |
-| --- | --- | --- |
-| 600 ms | 1 s, mean only | the board's declared startup budget |
-| 5 s | 1 s plus 64 x 32 LF ticks | clears the `LFXO` calibration window |
-| hourly (configurable) | 125 ms plus 64 x 32 LF ticks | nothing re-evaluates a satisfied clock request |
-
-The early probe avg. At 20 ms into boot the spread read a 220 HF
-tick range against 2 once settled, so judging it that early can be false alarm.
-Probe is there to separate dead from slow-starting.
+A bad verdict latches a fault flag. Two good readings clear it.
 
 ## SoC resources
 
@@ -125,7 +103,7 @@ Probe is there to separate dead from slow-starting.
 | `TIMER` | `timer130`, CC 0 and 1 |
 | DPPI | channels 2 and 3 on `DPPIC130` and `DPPIC133` |
 | PPIB | `PPIB130` ch 18 and 19 to `PPIB134` ch 2 and 3 |
-| `fll16m` | held for the gate only, released after |
+| `fll16m` | held for the window only, released after |
 | threads | one, 1024 B stack, `K_PRIO_PREEMPT(10)` |
 | pins | N/A |
 
@@ -182,7 +160,7 @@ spread between 19 and 58 ppm against a 150 ppm threshold.
 
 ## probe
 
-Same checks as the late probe, short gate. Captured with
+Same checks as the late probe, 125 ms window. Captured with
 `LF_MONITOR_PERIOD_MS` shortened to 5 s.
 
 ```
@@ -219,7 +197,7 @@ Reasoning: If [this](https://docs.nordicsemi.com/r/bundle/ngl_001/page/gl/ngl_00
 00:29:11  fault flag cleared after 2 good readings
 ```
 
-Gate counts HF ticks across a fixed number of LF ticks, so a longer window means a slower clock
+Probe counts HF ticks across a fixed number of LF ticks, so a longer window means a slower clock
 
 | reading | implied LFCLK | share of nominal |
 | --- | --- | --- |
@@ -244,7 +222,7 @@ interval, 5 s here.
 
 ## an LF counter that is not advancing
 
-`counter_stop(rtc130)`, so the counter does not tick. To a gate that is
+`counter_stop(rtc130)`, so the counter does not tick. To the probe that is
 indistinguishable from a dead `LFCLK`: the value never changes.
 
 ```
@@ -254,30 +232,30 @@ indistinguishable from a dead `LFCLK`: the value never changes.
 [00:00:12.624,996] <wrn> lf_probe: late probe: LF_ABSENT, no gate closed
 ```
 
-The early probe reports at 6.62 s. It tried the captured gate, timed out at 3 s,
-fell back to the software gate, and timed out again. `LF_ABSENT` costs about
-6 s per probe and needs both gates to fail.
+The early probe reports at 6.62 s. It tried the DPPI window, timed out at 3 s,
+fell back to the CPU window, and timed out again. `LF_ABSENT` costs about
+6 s per probe and needs both windows to fail.
 
-The late probe ran back to back at 12.62 s instead of being skipped, because its
-absolute 5 s deadline had already passed when the early probe finished.
+The late probe ran at 12.62 s, straight after the early one. Its absolute 5 s
+deadline had already passed, so it fired on the spot.
 
 > A stopped `LFCLK` cannot be produced from inside. It stops the CPU and
-> no application code runs, so that one is recognition only. `LF_ABSENT` exists to
-> report a non-advancing LF counter as a verdict rather than hanging or printing a
-> number it never measured.
+> no application code runs, so that one is recognition only. `LF_ABSENT` turns a
+> non-advancing LF counter into a verdict. Without it the probe would hang, or
+> print a number it never measured.
 
 ## a broken event route
 
-`-EIO` rather than a verdict. Produced by giving a second consumer a `rtc130` CC
-channel: the Zephyr counter driver manages `EVTEN` for its own alarms and cleared
-the `COMPARE` enables the captured gate needs.
+Giving a second consumer a `rtc130` CC channel produces `-EIO` instead of a
+verdict. (The Zephyr counter driver manages `EVTEN` for its own alarms and
+cleared the `COMPARE` enables the DPPI window needs.)
 
 ```
 capture failed (err -5) but the software gate read -12 ppm: DPPI route fault, not a clock fault
 early probe: undetermined (err -5)
 ```
 
-The captured gate died and the software gate read a healthy clock, so the probe
+The DPPI window died and the CPU window read a healthy clock, so the probe
 reports the route. The cause here was register contention. A broken bridge takes
 the same branch.
 
@@ -287,7 +265,7 @@ the same branch.
 ## the fault latch clearing
 
 RC board never recovers, clearing needs a fault that goes away.
-`LF_PPM_REJECT` set to 3, between the long gate -6 ppm and the short gate 0 ppm.
+`LF_PPM_REJECT` set to 3, between the 1 s window's -6 ppm and the 125 ms window's 0 ppm.
 So the boot probes fail and the runtime probes pass.
 `LF_MONITOR_PERIOD_MS` shortened to 4 s to make it watchable.
 
@@ -336,7 +314,7 @@ threshold comes from: 2.6x above the worst crystal reading, 1.65x below the
 quietest RC one.
 
 > [!NOTE]
-> Measure the spread inside the probe, right after the gate. An earlier version
+> Measure the spread inside the probe, right after the 1 s window. An earlier version
 > ran it from a fresh `lf_ref_acquire()` and read 76-110 ppm on the same
 > crystal, because it was measuring the HFXO ramp along with the LF source.
 
@@ -351,17 +329,17 @@ quietest RC one.
 | function | job |
 | --- | --- |
 | `lf_ref_check()` | boot config oracle, resolves accuracy against what the board declares |
-| `lf_ref_acquire()` / `lf_ref_release()` | hold `fll16m` at its best accuracy for the gate |
-| `lf_gate_measure()` | software gate. Fallback, and the discriminator for DPPI route faults |
-| `lf_capture_measure()` | DPPI-captured gate |
-| `lf_verdict_get()` | capture first, software gate second, then a verdict |
-| `lf_spread_measure()` | cycle-to-cycle deviation over `LF_JITTER_SAMPLES` short gates |
+| `lf_ref_acquire()` / `lf_ref_release()` | hold `fll16m` at its best accuracy for the window |
+| `lf_gate_measure()` | CPU window. Fallback, and the discriminator for DPPI route faults |
+| `lf_capture_measure()` | DPPI window |
+| `lf_verdict_get()` | DPPI window first, CPU window second, then a verdict |
+| `lf_spread_measure()` | cycle-to-cycle deviation over `LF_JITTER_SAMPLES` 32-tick windows |
 | `lf_probe_run()` | one scheduled probe plus the fault latch |
 | `lf_monitor_thread()` | early probe, late probe, then the hardcoded time based poll |
 
 `lf_verdict_get()` tries the capture first because it's the
-accurate one, and only returns `LF_ABSENT` when the software gate fails too.
+accurate one, and only returns `LF_ABSENT` when the CPU window fails too.
 
 misconfigured DPPI route times out exactly like a dead clock, so if the capture
-fails while the software gate still reads a healthy clock you get `-EIO` and the
+fails while the CPU window still reads a healthy clock you get `-EIO` and the
 software reading in the log.
